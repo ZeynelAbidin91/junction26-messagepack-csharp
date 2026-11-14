@@ -32,6 +32,19 @@ const STATUS = {
   affected: 'code untouched, behaviour changes',
   same: 'unchanged',
 };
+const SEVERITY = { CAUTION: '🛑', WARNING: '⚠️', IMPORTANT: '❗', NOTE: 'ℹ️' };
+const SEVERITY_ORDER = ['CAUTION', 'WARNING', 'IMPORTANT', 'NOTE'];
+const REASON = { intent: '`intent`', 'trade-off': '`trade-off`', unreproduced: '`unreproduced`', 'out-of-reach': '`out-of-reach`' };
+const REQ_VERDICT = { met: '✅ met', partly: '🟡 partly', 'not-met': '❌ not met', 'not-shown': '⚠️ not shown' };
+const REPRO = {
+  reproduced: 'So the bug was reproduced, and a "fixed" verdict is allowed.',
+  unreproduced: 'So the bug was **not** reproduced, and the script will not let the review say the PR fixes it.',
+  'no-repro': 'So the script will not let the review say the PR fixes it.',
+  'not-run': 'So the script will not let the review say the PR fixes it.',
+  'bad-symptom': 'The prediction could not be checked, so the script will not let the review say the PR fixes it.',
+};
+// Only people a human named (REVIEW_MAP_OWNERS, or the PR's reviewers and assignees) get an @-mention.
+const ownerText = (o) => (o?.login ? `@${o.login}${o.source === 'PR reviewers' ? ' <sub>(from the PR reviewers)</sub>' : ''}` : 'unassigned <sub>(set the repository variable `REVIEW_MAP_OWNERS`)</sub>');
 const TAG = { cause: '🟧 **cause**', effect: '🟦 effect', same: 'same' };
 
 const cell = (s) => String(s ?? '').replace(/\|/g, '\\|').replace(/\r?\n/g, '<br>');
@@ -53,6 +66,74 @@ export async function render(a, { analysisDir = '.' } = {}) {
   p(MARKER);
   p(`## Review map · \`${a.pr.branch}\``);
   p('');
+
+  // ---- the top: what it found, what it refused to decide, what it did not check ---------------
+  const shorts = (refs) => (refs ?? []).filter((r) => r.resolved?.ok).map((r) => r.resolved.short ?? r.resolved.quote);
+  const found = [...(a.found ?? [])].sort((x, y) => SEVERITY_ORDER.indexOf(x.severity) - SEVERITY_ORDER.indexOf(y.severity));
+  const decisions = a.decisions ?? [];
+  const notChecked = a.notChecked ?? [];
+
+  p(`### What it found (${found.length})`);
+  p('');
+  if (!found.length) p('_Nothing the evidence backs._');
+  found.forEach((f, i) => {
+    const ev = shorts(f.refs);
+    const tag = f.computed ? ' <sub>🤖 computed by the script</sub>' : ev.length ? ` <sub>${ev.join(' · ')}</sub>` : '';
+    p(`${i + 1}. ${SEVERITY[f.severity]} ${f.statement}${tag}`);
+  });
+  p('');
+  const withQuotes = found.map((f, i) => ({ i, qs: quotes(f.refs) })).filter((x) => x.qs.length);
+  if (withQuotes.length) {
+    p('<details>');
+    p('<summary>What the runs show for each finding, copied by a script</summary>');
+    p('');
+    for (const { i, qs } of withQuotes) {
+      p(`${i + 1}. ${found[i].statement}`);
+      for (const q of qs) p(`   - ${q}`);
+    }
+    p('');
+    p('</details>');
+    p('');
+  }
+
+  p(`### What it refused to decide (${decisions.length})`);
+  p('');
+  if (!decisions.length) p('_Nothing: every question in this review is answered by the evidence._');
+  decisions.forEach((d, i) => {
+    p(`${i + 1}. **${d.question}** ${REASON[d.reason] ?? code(d.reason)}${d.computed ? ' <sub>🤖 opened by rule</sub>' : ''}`);
+    p(`   - **Why:** ${d.detail}`);
+    const qs = quotes(d.refs);
+    if (qs.length) p(`     <br><sub>${qs.join(' · ')}</sub>`);
+    p(`   - **Would settle it:** ${d.wouldSettleIt}`);
+    if (d.options?.length) p(`   - **Options:** ${d.options.map((o, k) => `(${String.fromCharCode(97 + k)}) ${o}`).join(' · ')}`);
+    p(`   - **Owner:** ${ownerText(d.owner)}`);
+  });
+  if (decisions.length) {
+    p('');
+    p('<sub>Reasons are from a fixed list. `intent`: the requirement does not say. `trade-off`: a policy call with no technically right answer. `unreproduced`: the reported symptom never appeared on the code before the change. `out-of-reach`: the tools here cannot exercise it.</sub>');
+  }
+  p('');
+
+  p(`### What it did not check (${notChecked.length})`);
+  p('');
+  if (!notChecked.length) p('_Nothing listed._');
+  notChecked.forEach((n, i) => {
+    p(`${i + 1}. **${n.item}**: ${n.reason}.${n.computed ? ' <sub>🤖 computed by the script</sub>' : ''}`);
+    p(`   - **Risk if wrong:** ${n.riskIfWrong}. **How to check:** ${n.howToCheck}.`);
+  });
+  p('');
+
+  // ---- confidence: computed by the script ---------------------------------------------------
+  if (a.confidence?.length) {
+    p('> [!CAUTION]');
+    p('> **Reduced confidence in this run.** Read the lists above with these in mind:');
+    for (const c of a.confidence) p(`> - ${c}`);
+    p('');
+  }
+
+  // ---- summary ------------------------------------------------------------------------------
+  p('### In short');
+  p('');
   if (typeof a.summary === 'string') p(a.summary);
   else if (a.summary?.length) {
     p(a.summary.map((s) => s.sentence).join(' '));
@@ -68,14 +149,6 @@ export async function render(a, { analysisDir = '.' } = {}) {
     p('</details>');
   } else p('_No summary sentence could be backed by the recorded evidence; see "Not backed by the evidence" below._');
   p('');
-
-  // ---- confidence: computed by the script, shown before anything else -----------------------
-  if (a.confidence?.length) {
-    p('> [!CAUTION]');
-    p('> **Reduced confidence in this run.** Read the findings below with these in mind:');
-    for (const c of a.confidence) p(`> - ${c}`);
-    p('');
-  }
 
   const changed = a.nodes.filter((n) => n.status === 'changed').length;
   const affected = a.nodes.filter((n) => n.status === 'affected').length;
@@ -93,6 +166,32 @@ export async function render(a, { analysisDir = '.' } = {}) {
   );
   p('');
 
+  // ---- the issue, requirement by requirement ---------------------------------------------------
+  if (a.requirements?.length) {
+    p(`### The ${a.pr.issueRef ? `issue (${code(a.pr.issueRef)})` : 'request'}, requirement by requirement`);
+    p('');
+    const r = a.reproduction;
+    if (r && r.status !== 'no-symptom') {
+      const predicted = r.symptom?.contains?.length ? `${r.symptom.contains.map(code).join(' or ')} at ${r.node ?? code(r.symptom.handoff)}` : 'nothing';
+      const seen = (r.rows ?? []).map((x) => `${code(x.id)}: ${!x.ran ? 'did not run' : x.seen ? `**seen** (${code(x.value)})` : `not seen (${code(x.value)})`}`).join('; ');
+      p(`**Reproducing the reported bug.** ${a.plannedBeforeRuns ? 'Before anything ran, the plan predicted' : 'The reviewer stated'} the bug would show as ${predicted} on the code before the PR. ${seen ? `Recorded: ${seen}.` : 'No scenario reproduces the issue.'} ${REPRO[r.status] ?? ''}`);
+      p('');
+    }
+    p('| | Requirement | Covered by (hand-offs that differ before → after) | Verdict |');
+    p('|---|---|---|---|');
+    for (const q of a.requirements) {
+      const cov = q.covers.length
+        ? q.covers.map((c) => `[${code(c.id)}](#user-content-trace-${c.id}): ${!c.ran ? 'did not run' : c.differs.length ? c.differs.join(' ') : 'no difference'}`).join('<br>')
+        : '_no scenario_';
+      const ev = shorts(q.refs);
+      const verdict = `${REQ_VERDICT[q.verdict]}<br><sub>${cell(q.note)}${ev.length ? `<br>${ev.join(' · ')}` : ''}${q.rule ? `<br>by rule: ${q.rule}` : ''}</sub>`;
+      p(`| ${q.id}${q.primary ? ' ★' : ''} | ${cell(q.statement)} | ${cov} | ${verdict} |`);
+    }
+    p('');
+    p(`<sub>★ the requirement that says the reported bug is gone. ${a.plannedBeforeRuns ? 'Requirements and the expected symptom were written in the plan step, before anything ran.' : 'Requirements and the expected symptom were written by hand after the runs, so they are not a prediction.'}</sub>`);
+    p('');
+  }
+
   // ---- pipeline map -----------------------------------------------------------------------
   p('### The change as a pipeline');
   p('');
@@ -107,39 +206,6 @@ export async function render(a, { analysisDir = '.' } = {}) {
   p('');
   p('🟧 changed by this PR · 🟩 code untouched, behaviour changes · ⬜ unchanged · dashed arrow = the data on that hand-off is different after this PR');
   p('');
-
-  // ---- what needs a human -----------------------------------------------------------------
-  if (a.attention?.length || a.computed?.length) {
-    p('### Start here');
-    p('');
-    for (const item of a.computed ?? []) {
-      p(`> [!${item.level ?? 'WARNING'}]`);
-      p(`> **${item.title}**`);
-      p('>');
-      for (const line of item.detail.split('\n')) p(`> ${line}`);
-      p('>');
-      p('> <sub>Computed by the script from the recorded runs; the reviewing agent cannot word or remove this item.</sub>');
-      p('');
-    }
-    for (const item of a.attention ?? []) {
-      p(`> [!${item.level ?? 'WARNING'}]`);
-      p(`> **${item.title}**`);
-      p('>');
-      for (const line of item.detail.split('\n')) p(`> ${line}`);
-      const qs = quotes(item.refs);
-      if (qs.length) {
-        p('>');
-        p('> Evidence, copied from the runs:');
-        for (const q of qs) p(`> - ${q}`);
-      }
-      const firstRun = (item.refs ?? []).find((r) => r.kind === 'run' && r.resolved?.ok);
-      if (firstRun && replayFor(firstRun.scenario)) {
-        p('>');
-        p(`> <sub>Re-check: \`${replayFor(firstRun.scenario)}\`</sub>`);
-      }
-      p('');
-    }
-  }
 
   // ---- traces: one real input followed through every hand-off -----------------------------
   if (a.traces?.cases?.length) {
@@ -344,7 +410,7 @@ export async function render(a, { analysisDir = '.' } = {}) {
 
   // ---- method -----------------------------------------------------------------------------
   p('<details>');
-  p('<summary>How this was checked, and what was not</summary>');
+  p('<summary>How this was checked</summary>');
   p('');
   p('**Run for real**');
   for (const m of a.method.observed) p(`- ${m}`);
@@ -361,8 +427,7 @@ export async function render(a, { analysisDir = '.' } = {}) {
     );
   }
   p('');
-  p('**Not covered**');
-  for (const m of a.method.limits) p(`- ${m}`);
+  p('What was not covered is listed at the top, under "What it did not check".');
   if (a.method.downgraded?.length) {
     p('');
     p('**Reviewer verdicts the script downgraded**');

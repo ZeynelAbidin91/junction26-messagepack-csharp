@@ -4,6 +4,20 @@ An AI reviewer for AI-written pull requests, built so a human can trust what it 
 
 It runs the change instead of only reading it. A reviewing agent (Claude) reads the diff and the issue and picks real inputs; those inputs and the repository's own tests run on the code before and after the change; the agent then explains the evidence. The result is one pull request comment.
 
+## The top of the comment: found, refused to decide, not checked
+
+The comment opens with three typed lists, kept apart on purpose:
+
+| List | Fields | Rules the script applies |
+|---|---|---|
+| **What it found** | statement, severity, evidence pointers | Only a run or a test can make a finding a WARNING or CAUTION; code reading alone becomes a NOTE. Findings computed from the runs (new tests that pass on the old code) are added by the script. |
+| **What it refused to decide** | question, reason, why, what would settle it, options, owner | The reason comes from a fixed list: `intent`, `trade-off`, `unreproduced`, `out-of-reach`. The script itself opens the "does this fix the issue?" decision when the issue's reproduction does not show the expected symptom on the code before the PR. |
+| **What it did not check** | item, reason, risk if wrong, how to check | The script adds changed lines no scenario or test ran, requirements no scenario covers, scenarios that could not run, and test projects that were not run. |
+
+**Requirements and the expected symptom are a prediction.** In the plan step, before anything runs, the agent breaks the issue into requirements (one marked primary: "the reported bug is gone"), maps each scenario to the requirements it covers, marks the issue's reproduction, and states how the bug will show in the recording (a hand-off and strings such as an exception type). After the runs, the requirement table shows each requirement, the scenarios that cover it with the hand-offs that differ, and a verdict. A requirement nothing covers is "not shown". The primary requirement cannot be "met" unless the predicted symptom was seen on the before side.
+
+**Owners.** A decision goes to a named engineer, never to the PR's author (an agent's operator). Set the repository variable `REVIEW_MAP_OWNERS` to `alice,bob` or per reason (`intent=alice,trade-off=bob,default=carol`). Without it, the PR's requested reviewers and assignees are used. Only these people get an `@`-mention; otherwise the decision shows as unassigned.
+
 ## The rule: the agent points, the script quotes
 
 The agent never writes evidence values. Every summary sentence, "Start here" item, unit example and claim carries pointers (`refs`) to the evidence:
@@ -71,6 +85,6 @@ Add `--rollforward-sdk` when the pinned .NET SDK isn't installed locally. The co
 A hand-written analysis (`analyses/2283.source.json`) goes through the same gate and checks:
 
 ```bash
-node lib/verify.mjs analyses/2283.source.json --repo <checkout>
+node scripts/finish.mjs analyses/2283.source.json --repo <checkout>
 node render.mjs analyses/2283.json
 ```

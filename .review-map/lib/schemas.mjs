@@ -11,10 +11,19 @@ export const Scenario = z.object({
   makeExpression: z.string(),
   describeExpression: z.string(),
   why: z.string(),
+  // Which requirements of the issue this scenario exercises, and whether it is the issue's own reproduction.
+  covers: z.array(z.string()),
+  reproducesIssue: z.boolean(),
 });
 
+// Chosen before anything runs, so the requirement list and the expected symptom are a prediction the
+// recorded runs then confirm or not; the agent cannot pick them after seeing the results.
 export const Plan = z.object({
   understanding: z.string(),
+  requirements: z.array(z.object({ id: z.string(), statement: z.string(), primary: z.boolean() })),
+  // How the reported bug shows up in a recording: at this hand-off, on the code before the PR, the value
+  // contains one of these strings. An empty list means the issue describes no observable symptom.
+  symptom: z.object({ handoff: z.string(), contains: z.array(z.string()), why: z.string() }),
   scenarios: z.array(Scenario),
 });
 
@@ -32,7 +41,20 @@ export const Analysis = z.object({
   summary: z.array(z.object({ sentence: z.string(), refs: Refs })),
   nodes: z.array(z.object({ id: z.string(), label: z.string(), sub: z.string(), status: Status })),
   edges: z.array(z.object({ from: z.string(), to: z.string(), label: z.string().nullable(), changed: z.boolean() })),
-  attention: z.array(z.object({ level: z.enum(['WARNING', 'CAUTION', 'IMPORTANT', 'TIP', 'NOTE']), title: z.string(), detail: z.string(), refs: Refs })),
+  // The top of the comment: what the review found, what it refused to decide, and what it did not check.
+  found: z.array(z.object({ statement: z.string(), severity: z.enum(['WARNING', 'CAUTION', 'IMPORTANT', 'NOTE']), refs: Refs })),
+  decisions: z.array(
+    z.object({
+      question: z.string(),
+      reason: z.enum(['intent', 'trade-off', 'unreproduced', 'out-of-reach']),
+      detail: z.string(),
+      wouldSettleIt: z.string(),
+      options: z.array(z.string()),
+      refs: Refs,
+    }),
+  ),
+  notChecked: z.array(z.object({ item: z.string(), reason: z.string(), riskIfWrong: z.string(), howToCheck: z.string() })),
+  requirements: z.array(z.object({ id: z.string(), verdict: z.enum(['met', 'partly', 'not-met', 'not-shown']), note: z.string(), refs: Refs })),
   traces: z.array(
     z.object({
       id: z.string(),
@@ -61,7 +83,6 @@ export const Analysis = z.object({
       refs: Refs,
     }),
   ),
-  limits: z.array(z.string()),
 });
 
 /** JSON schema for structured outputs: every object closed, every property required. */

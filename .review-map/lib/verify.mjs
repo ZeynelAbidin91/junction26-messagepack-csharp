@@ -2,14 +2,7 @@
 // of a scenario that ran, a test, a range of code lines); this module resolves every pointer against the
 // recorded files and quotes what it finds. Items whose pointers do not resolve, or resolve to something
 // other than what the agent said they would show, are moved out of the main sections into "unverified".
-//
-// CLI (for hand-written analyses):
-//   node lib/verify.mjs <analysis.json> --repo <checkout> [--head <sha>]   rewrites the file in place
-
-import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+// Hand-written analyses go through the same gate with `node scripts/finish.mjs`.
 
 const code = (s) => '`' + String(s).replace(/`/g, "'") + '`';
 const short = (s, n = 90) => {
@@ -55,7 +48,14 @@ export function parseRef(r) {
 
 /** Parses every pointer in an analysis in place. */
 export function normalizeRefs(a) {
-  const items = [...(a.summary ?? []), ...(a.attention ?? []), ...(a.claims ?? []), ...(a.units ?? []).flatMap((u) => u.examples ?? [])];
+  const items = [
+    ...(a.summary ?? []),
+    ...(a.found ?? []),
+    ...(a.decisions ?? []),
+    ...(a.requirements ?? []),
+    ...(a.claims ?? []),
+    ...(a.units ?? []).flatMap((u) => u.examples ?? []),
+  ];
   for (const x of items) if (Array.isArray(x.refs)) x.refs = x.refs.map(parseRef);
   return a;
 }
@@ -71,7 +71,7 @@ export function verifyAnalysis(a, { before, after, results, handoffs, readCode, 
   const usable = (s) => s && !s.probeError;
   const testNames = [...new Set([...Object.keys(results?.after ?? {}), ...Object.keys(results?.before ?? {})])];
 
-  const resolveRef = (r) => {
+  const resolveRaw = (r) => {
     if (r.kind === 'invalid') return { ok: false, reason: `malformed pointer ${code(r.text)}: ${r.why}` };
     if (r.kind === 'run') {
       const h = H[r.handoff];
@@ -128,6 +128,19 @@ export function verifyAnalysis(a, { before, after, results, handoffs, readCode, 
     return { ok: false, reason: 'unknown evidence kind' };
   };
 
+  // A short label for the compact evidence links at the top of the comment.
+  const resolveRef = (r) => {
+    const res = resolveRaw(r);
+    if (!res.ok) return res;
+    if (r.kind === 'run') {
+      const num = (H[r.handoff]?.node ?? r.handoff).split(' ')[0];
+      const side = r.side === 'both' ? '' : ` ${extraSides[r.side]?.label ?? r.side}`;
+      res.short = `[${code(r.scenario)} ${num}${side}](#user-content-${res.anchor})`;
+    } else if (r.kind === 'test') res.short = `test ${code(r.test.split('(')[0].split('.').pop())}`;
+    else res.short = res.quote.split(': ')[0];
+    return res;
+  };
+
   normalizeRefs(a);
   const unverified = [];
   const check = (item, section, text, { allowEmpty = false } = {}) => {
@@ -147,9 +160,34 @@ export function verifyAnalysis(a, { before, after, results, handoffs, readCode, 
   };
 
   a.summary = (a.summary ?? []).filter((s) => check(s, 'Summary', s.sentence));
-  a.attention = (a.attention ?? []).filter((x) => check(x, 'Start here', `**${x.title}** ${x.detail}`));
-  for (const u of a.units ?? []) u.examples = (u.examples ?? []).filter((x) => check(x, `Unit ${u.name}`, x.note));
   const downgraded = [];
+  const observed = (x) => (x.refs ?? []).some((r) => r.kind !== 'code' && r.resolved?.ok);
+  // Script-computed items carry their own evidence and are not the agent's words.
+  a.found = (a.found ?? []).filter((x) => {
+    if (x.computed) return true;
+    if (!check(x, 'Found', x.statement)) return false;
+    // Only a run or a test can make a finding a warning; code reading alone cannot.
+    if (['WARNING', 'CAUTION'].includes(x.severity) && !observed(x)) {
+      downgraded.push(`"${short(x.statement, 120)}": marked ${x.severity}, but no run or test shows it, so it is shown as a note`);
+      x.severity = 'NOTE';
+    }
+    return true;
+  });
+  a.decisions = (a.decisions ?? []).filter((x) => {
+    if (!x.computed) return check(x, 'Refused to decide', x.question, { allowEmpty: true });
+    for (const r of x.refs ?? []) r.resolved = resolveRef(r);
+    return true;
+  });
+  // Requirement verdicts stay in the table; a verdict the evidence does not back becomes "not shown".
+  for (const r of a.requirements ?? []) {
+    for (const ref of r.refs ?? []) ref.resolved = resolveRef(ref);
+    const failing = (r.refs ?? []).filter((x) => !x.resolved.ok);
+    if (r.verdict !== 'not-shown' && (failing.length || !observed(r))) {
+      downgraded.push(`${r.id}: marked ${r.verdict}, but ${failing.length ? `its evidence did not resolve (${failing.map((x) => x.resolved.reason).join('; ')})` : 'no run or test shows it'}, so it is shown as not shown`);
+      r.verdict = 'not-shown';
+    }
+  }
+  for (const u of a.units ?? []) u.examples = (u.examples ?? []).filter((x) => check(x, `Unit ${u.name}`, x.note));
   a.claims = (a.claims ?? []).filter((c) => {
     // An honest "not verified" without evidence stays in the claims table.
     const ok = check(c, 'Claims', `"${c.claim}" (${c.verdict})`, { allowEmpty: c.verdict === 'not-verified' });
@@ -160,52 +198,4 @@ export function verifyAnalysis(a, { before, after, results, handoffs, readCode, 
     return ok;
   });
   return { unverified, downgraded };
-}
-
-// ---- CLI ---------------------------------------------------------------------------------------
-// Finishes a hand-written analysis the same way `review.mjs analyze` finishes the agent's: resolves the
-// refs, and adds the script's own confidence notes, computed items, sensitivity and fingerprints.
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const opt = (k) => {
-    const i = process.argv.indexOf(`--${k}`);
-    return i > 0 ? process.argv[i + 1] : undefined;
-  };
-  const file = resolve(process.argv[2]);
-  const target = resolve(opt('out') ?? file.replace(/\.source\.json$/, '.json'));
-  const src = JSON.parse(readFileSync(file, 'utf8'));
-  const dir = resolve(dirname(file), src.traces.evidence);
-  const load = (f) => (existsSync(resolve(dir, f)) ? JSON.parse(readFileSync(resolve(dir, f), 'utf8')) : []);
-  const repo = resolve(opt('repo'));
-  const readCode = (p) => {
-    const r = spawnSync('git', ['show', `${src.pr.headFull}:${p}`], { cwd: repo, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
-    return r.status === 0 ? r.stdout : null;
-  };
-  const here = dirname(fileURLToPath(import.meta.url));
-  const { handoffs } = await import(pathToFileURL(resolve(here, '..', 'adapters', src.traces.adapter, 'handoffs.mjs')).href);
-  const { computedAttention, confidence, fingerprints, sensitivity } = await import(pathToFileURL(resolve(here, 'checks.mjs')).href);
-  const H = handoffs({ code });
-  const tests = load('tests.json');
-  const before = load('probe-before.json');
-  const after = load('probe-after.json');
-  const extraSides = Object.fromEntries((src.traces.variants ?? []).map((v) => [v.side, { label: v.label, runs: load(v.file) }]));
-  const a = structuredClone(src);
-  const { unverified, downgraded } = verifyAnalysis(a, { before, after, results: tests.results, handoffs: H, readCode, blob: src.pr.blob, extraSides });
-  const sens = sensitivity({ tests, after, mutant: load('probe-mutant.json'), handoffs: H });
-  const failed = (load('scenarios.json') ?? []).map((s) => s.id).filter((id) => !after.some((s) => s.id === id && !s.probeError));
-  const { results, ...testSummary } = tests;
-  Object.assign(a, {
-    confidence: confidence({ tests, failedScenarios: failed, sensitivity: sens }),
-    computed: computedAttention({ tests, blob: src.pr.blob }),
-    tests: testSummary,
-    unverified,
-    sensitivity: sens,
-    integrity: {
-      files: fingerprints(['scenarios.json', 'probe-before.json', 'probe-after.json', 'probe-mutant.json', 'tests.json', ...(src.traces.variants ?? []).map((v) => v.file)].map((f) => resolve(dir, f))),
-      artifact: null,
-      replay: src.replay ?? null,
-    },
-    method: { ...a.method, downgraded },
-  });
-  writeFileSync(target, JSON.stringify(a, null, 2));
-  console.log(`${target}: ${unverified.length} unverified, ${downgraded.length} downgraded, ${a.confidence.length} confidence notes`);
 }

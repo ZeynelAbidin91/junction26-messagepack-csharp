@@ -25,8 +25,8 @@ import { parseArgs } from 'node:util';
 import { ask } from './lib/claude.mjs';
 import { budgetedDiff, linkedIssue, mergeBaseOf, pullRequest } from './lib/context.mjs';
 import { collectEvidence } from './lib/evidence.mjs';
-import { computedAttention, confidence, fingerprints, sensitivity } from './lib/checks.mjs';
-import { verifyAnalysis } from './lib/verify.mjs';
+import { fingerprints, reproduction } from './lib/checks.mjs';
+import { finishAnalysis } from './lib/finish.mjs';
 import { Analysis, Plan } from './lib/schemas.mjs';
 import { MARKER, render } from './render.mjs';
 
@@ -90,7 +90,11 @@ In this step you choose the inputs. The probe described in <pipeline> will run e
 - inputs that reach each new or changed branch in the diff, especially edge cases the author's tests do not cover;
 - an input that tests a behaviour the author claims (in the PR, docs, comments or test names);
 - one control input that the change should not affect at all.
-Pick inputs that would expose a problem if there is one; a scenario that only confirms the happy path is worth little. Each scenario must compile on its own: follow the scenario format exactly. In "why", say in one sentence what the scenario will show.`;
+Pick inputs that would expose a problem if there is one; a scenario that only confirms the happy path is worth little. Each scenario must compile on its own: follow the scenario format exactly. In "why", say in one sentence what the scenario will show.
+
+Before choosing scenarios, break the issue into requirements: short statements of what the issue asks for or reports, each with an id (R1, R2, ...). Mark as primary the one that states the reported bug is gone. If there is no linked issue, take the requirements from the PR description. For each scenario, list in "covers" the requirement ids it exercises, and set "reproducesIssue" on the scenario(s) that reproduce the issue's own report.
+
+Also state the symptom: how the reported bug shows up in a recording of the code before the PR. Give the hand-off id from <pipeline> and one or more short strings, one of which the recorded value at that hand-off will contain on the before side (for example an exception type or a diagnostic id). This is checked against the recording by a script; if the issue's reproduction does not show it, the review will say the bug was not reproduced. If the issue describes no observable symptom, leave "contains" empty.`;
 
   const user = `${contextBlock(ctx, diff)}
 
@@ -101,7 +105,7 @@ ${JSON.stringify(adapter.exampleScenarios, null, 2)}
 Choose the scenarios for this pull request.`;
 
   const { value, model } = await ask({ system, user, schema: Plan, label: 'plan' });
-  writeJson('plan.json', { ...value, model });
+  writeJson('plan.json', { ...value, model, issueRef: ctx.issue?.ref ?? null });
   writeJson('scenarios.json', value.scenarios);
   log(`plan: ${value.scenarios.length} scenarios: ${value.scenarios.map((s) => s.id).join(', ')}`);
 }
@@ -165,11 +169,14 @@ Prefer run and test refs; a claim backed only by code refs is shown as "holds in
 
 - summary: two or three plain sentences: what the change does, whether it does what the issue asked, and the most important thing the human must know. Each sentence with refs.
 - nodes and edges: the pipeline from <pipeline>, only the stages this change touches or affects plus their neighbours (4 to 8 nodes). status "changed" if the PR edits that stage's code, "affected" if its code is untouched but its behaviour differs in the evidence, "same" otherwise. Short ids (letters only). Label the edges that match recorded hand-offs with ① model, ② diagnostics, ③ C# files, ④ bytes; mark an edge changed when the evidence shows different data crossing it.
-- attention: what needs the human, most important first. Each item says the input and the decision the human has to make, with refs to the hand-offs that show it. End with one TIP listing what the human can stop worrying about, with refs. Do not pad: if nothing needs a decision, say so in one item. The script already adds items for new tests that pass on the old code and for changed lines nothing reached (see <script_findings>); do not repeat those.
+The top of the comment is three separate lists. Keep facts, decisions and gaps apart:
+- found: facts the evidence shows, most important first. statement: one sentence; severity WARNING (a defect or data loss a user would hit), CAUTION (risky behaviour), IMPORTANT (needed to understand the change) or NOTE; refs. A finding with no run or test ref is shown as a NOTE whatever severity you give it. Include what the human can stop worrying about as NOTE items with refs.
+- decisions: what you refuse to decide, because it is not yours to decide. question: one question a human answers. reason, from a fixed list: "intent" (the requirement does not say whether this is wanted), "trade-off" (a policy call with no technically right answer), "unreproduced" (a symptom never appeared on the before side), "out-of-reach" (the tools here cannot exercise it, such as a NativeAOT publish or an IDE). detail: one or two sentences on why. wouldSettleIt: what evidence or answer settles it. options: the realistic answers (two or three). refs when evidence bears on it. Do not add the "does this fix the issue" decision when the issue was not reproduced: the script adds that one by rule (see <script_findings>).
+- notChecked: what this review did not check: item, reason, riskIfWrong, howToCheck. The script already adds changed lines nothing reached, requirements no scenario covers, and test projects that were not run; do not repeat those.
+- requirements: a verdict for each requirement id in <requirements>: "met", "partly", "not-met" or "not-shown", a one-sentence note, and refs. A verdict without a run or test ref that resolves is shown as "not-shown".
 - traces: one entry per scenario worth showing, most important first, using the scenario ids. story: one to three sentences of cause and effect, naming the hand-off numbers. where: for the hand-off where the cause lies, point to the code (a Markdown link like [TypeCollector.cs line 239](${blob}/src/...#L239)); use handoff ids from <pipeline>.
 - units: the functions or stages that changed and the ones whose behaviour changed, each with what it receives and emits, what changed, and examples. An example is a note (one sentence on what the evidence shows) and refs; the script quotes the before and after values.
 - claims: statements the author made (PR text, commit message, docs, code comments, test names and test comments), each with a verdict, a one-sentence reason, and refs. Include claims that hold. A claim you could not check: verdict "not-verified" and no refs.
-- limits: what this review did not check.
 
 Write for a busy engineer: short sentences, no jargon without a gloss, no praise. Code links go to ${blob}. Never link to issues in ${adapter.issueRepo}; write them as \`${adapter.issueRepo.split('/')[0]}#123\`.`;
 
@@ -187,8 +194,12 @@ ${JSON.stringify({ project: testSummary.project, after: testSummary.after, befor
 ${testNames.join('\n')}
 </test_names>
 
+<requirements note="Chosen in the plan step, before anything ran.">
+${JSON.stringify((plan.requirements ?? []).map((r) => ({ ...r, coveredBy: plan.scenarios.filter((s) => s.covers?.includes(r.id)).map((s) => s.id) })), null, 1)}
+</requirements>
+
 <script_findings note="Computed by a script from the runs and shown in the comment as they are.">
-${JSON.stringify({ newTests: testSummary.newTests, changedLineCoverage: testSummary.coverage }, null, 1)}
+${JSON.stringify({ issueReproduction: reproduction({ plan, before, handoffs: HANDOFFS }), newTests: testSummary.newTests, changedLineCoverage: testSummary.coverage }, null, 1)}
 </script_findings>
 
 Write the review map.`;
@@ -203,31 +214,38 @@ Write the review map.`;
   }
   writeJson('agent-output.json', { value: a, model, usage });
 
-  // The gate: every pointer the agent gave is resolved against the recordings and quoted by the script.
+  // The gate and the rules: every pointer is resolved against the recordings and quoted by the script,
+  // and the script adds what it decides by rule (lib/finish.mjs).
   const readCode = (p) => {
     const r = spawnSync('git', ['show', `${ctx.head}:${p}`], { cwd: repo, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
     return r.status === 0 ? r.stdout : null;
   };
-  const verified = structuredClone(a);
-  const { unverified, downgraded } = verifyAnalysis(verified, { before, after, results, handoffs: HANDOFFS, readCode, blob });
-
-  // Every scenario a kept item cites gets a trace, so each quote can link to its full table.
-  const cited = new Set(
-    [...verified.summary, ...verified.attention, ...verified.claims, ...verified.units.flatMap((u) => u.examples)]
-      .flatMap((x) => x.refs)
-      .filter((r) => r.kind === 'run' && r.resolved?.ok)
-      .map((r) => r.scenario),
-  );
-  const traceCases = verified.traces.filter((t) => plan.scenarios.some((s) => s.id === t.id));
-  for (const id of cited) {
-    if (traceCases.some((t) => t.id === id)) continue;
-    const s = plan.scenarios.find((x) => x.id === id);
-    if (s) traceCases.push({ id, title: s.title, story: s.why, where: [] });
-  }
-
-  const ran = after.filter((s) => !s.probeError).map((s) => s.id);
-  const failed = plan.scenarios.filter((s) => !ran.includes(s.id)).map((s) => s.id);
-  const sens = sensitivity({ tests, after, mutant, handoffs: HANDOFFS });
+  const projects = spawnSync('git', ['ls-tree', '-r', '--name-only', ctx.head], { cwd: repo, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
+    .stdout.split('\n')
+    .filter((p) => adapter.isTest(p) && p.endsWith('.csproj') && p !== adapter.testProject);
+  const changed = (tests.changedFiles ?? []).map((f) => f.path);
+  const otherTestProjects = projects.map((p) => {
+    const dir = p.slice(0, p.lastIndexOf('/') + 1);
+    return { path: p, name: p.split('/').pop().replace(/\.csproj$/, ''), touched: changed.some((c) => c.startsWith(dir)) };
+  });
+  const fin = finishAnalysis(a, {
+    plan,
+    issueRef: ctx.issue?.ref ?? null,
+    pr: ctx.pr,
+    tests,
+    before,
+    after,
+    mutant,
+    extraSides: {},
+    handoffs: HANDOFFS,
+    readCode,
+    blob,
+    ownersSetting: process.env.REVIEW_MAP_OWNERS,
+    otherTestProjects,
+  });
+  const verified = fin.verified;
+  const { unverified, downgraded } = fin;
+  const failed = fin.failedScenarios;
   const side = (t) => (t.built ? `${t.passed} passed, ${t.failed} failed` : `did not build (${t.reason})`);
   const runId = process.env.GITHUB_RUN_ID;
   let artifact = null;
@@ -243,25 +261,30 @@ Write the review map.`;
       head: ctx.head.slice(0, 8),
       base: ctx.mergeBase.slice(0, 8),
       blob,
+      issueRef: ctx.issue?.ref ?? null,
       noLinkRepos: [adapter.issueRepo],
       generatedBy: `Generated automatically by review-map with \`${model}\`, which did not write this change${runId ? ` · [workflow run](${process.env.GITHUB_SERVER_URL}/${ctx.slug}/actions/runs/${runId})` : ''}.`,
     },
-    confidence: confidence({ tests, failedScenarios: failed, sensitivity: sens }),
-    computed: computedAttention({ tests, blob }),
+    confidence: fin.confidence,
+    found: verified.found,
+    decisions: verified.decisions,
+    notChecked: fin.notChecked,
+    requirements: fin.requirements,
+    reproduction: fin.repro,
+    plannedBeforeRuns: true,
     summary: verified.summary,
     nodes: verified.nodes,
     edges: verified.edges,
-    attention: verified.attention,
     traces: {
       evidence: 'evidence',
       adapter: adapter.name,
-      cases: traceCases.map((t) => ({ id: t.id, title: t.title, story: t.story, where: Object.fromEntries(t.where.map((w) => [w.handoff, w.text])) })),
+      cases: fin.traceCases.map((t) => ({ id: t.id, title: t.title, story: t.story, where: Array.isArray(t.where) ? Object.fromEntries(t.where.map((w) => [w.handoff, w.text])) : (t.where ?? {}) })),
     },
     tests: testSummary,
     units: verified.units,
     claims: verified.claims,
     unverified,
-    sensitivity: sens,
+    sensitivity: fin.sensitivity,
     integrity: {
       files: fingerprints([resolve(out, 'scenarios.json'), ev('probe-before.json'), ev('probe-after.json'), ev('probe-mutant.json'), ev('tests.json')]),
       artifact,
@@ -274,9 +297,8 @@ Write the review map.`;
         `${plan.scenarios.length} scenarios chosen by the reviewing agent from the diff and the issue, each run through the real generator, analyzer and run-time serializer on both sides${failed.length ? `; ${failed.length} could not run: ${failed.map((f) => `\`${f}\``).join(', ')}` : ''}.`,
         `\`${tests.project}\` on both sides. After: ${side(tests.after)}. Before (${tests.before.mode}): ${side(tests.before)}. ${tests.changes.length} tests changed outcome.`,
         `Built with .NET SDK ${tests.sdk} on ${tests.runner}${tests.pinnedSdk?.version ? ` (the repo pins ${tests.pinnedSdk.version})` : ''}.`,
-        `Reviewing agent: \`${model}\`, two calls (choose inputs, explain evidence). It cites evidence as pointers; every value quoted next to its words, the trace tables, the cause and effect tags, the test verdicts and the coverage are computed by a script from the recorded runs.`,
+        `Reviewing agent: \`${model}\`, two calls (choose inputs, requirements and the expected symptom; explain the evidence). It cites evidence as pointers; every value quoted next to its words, the trace tables, the cause and effect tags, the test verdicts, the coverage and the rule-made decisions are computed by a script from the recorded runs.`,
       ],
-      limits: [...verified.limits, `Only \`${tests.project}\` was run; other test projects in the solution were not.`],
       downgraded,
     },
     usage,

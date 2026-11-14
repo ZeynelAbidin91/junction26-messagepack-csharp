@@ -53,7 +53,18 @@ export function budgetedDiff(repo, mergeBase, head, adapter, { totalBudget = 180
 export function pullRequest(repoSlug, number) {
   const pr = ghJson(`repos/${repoSlug}/pulls/${number}`);
   if (!pr) throw new Error(`Cannot read pull request ${repoSlug}#${number}`);
-  return { number: pr.number, title: pr.title, body: pr.body ?? '', headRef: pr.head.ref, headSha: pr.head.sha, baseSha: pr.base.sha, url: pr.html_url };
+  return {
+    number: pr.number,
+    title: pr.title,
+    body: pr.body ?? '',
+    headRef: pr.head.ref,
+    headSha: pr.head.sha,
+    baseSha: pr.base.sha,
+    url: pr.html_url,
+    // People a human put on the PR: candidates to own the decisions the review refuses to make.
+    reviewers: (pr.requested_reviewers ?? []).map((u) => u.login),
+    assignees: (pr.assignees ?? []).map((u) => u.login),
+  };
 }
 
 /** The issue the PR names in its title or body ("#2234"), read from the adapter's issue repository. */

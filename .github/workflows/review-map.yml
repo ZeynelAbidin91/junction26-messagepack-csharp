@@ -28,6 +28,10 @@ env:
   # Model for the reviewing agent. Override without editing this file by setting a repository
   # variable REVIEW_MAP_MODEL (for example claude-opus-5-5 for a stronger, pricier review).
   REVIEW_MAP_MODEL: ${{ vars.REVIEW_MAP_MODEL || 'claude-sonnet-5-5' }}
+  # Who owns the decisions the review refuses to make: GitHub logins, either "alice,bob" or per reason
+  # "intent=alice,trade-off=bob,unreproduced=carol,out-of-reach=dave,default=alice". Without it, the
+  # PR's requested reviewers and assignees are used, and otherwise decisions are shown as unassigned.
+  REVIEW_MAP_OWNERS: ${{ vars.REVIEW_MAP_OWNERS }}
 
 jobs:
   plan:

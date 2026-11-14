@@ -54,33 +54,6 @@
         "changed": true
       }
     ],
-    "attention": [
-      {
-        "level": "WARNING",
-        "title": "A duplicate key now compiles into a formatter that drops data",
-        "detail": "Decide whether a duplicate key should stay a build error instead.",
-        "refs": [
-          "run:generated-dup-string-keys-fields:generated:both:differs",
-          "run:generated-dup-string-keys-fields:rtGenerated:after:any"
-        ]
-      },
-      {
-        "level": "CAUTION",
-        "title": "PLANTED: wrong direction",
-        "detail": "Claims the suppressed duplicate-int case now generates files.",
-        "refs": [
-          "run:suppressed-dup-int-keys:generated:both:differs"
-        ]
-      },
-      {
-        "level": "TIP",
-        "title": "Valid types are unaffected",
-        "detail": "The control input behaves the same on both sides.",
-        "refs": [
-          "run:suppressed-valid-control:rtDefault:both:same"
-        ]
-      }
-    ],
     "traces": [
       {
         "id": "generated-dup-string-keys-fields",
@@ -167,8 +140,77 @@
         ]
       }
     ],
-    "limits": [
-      "Fixture: not a real review."
+    "found": [
+      {
+        "severity": "WARNING",
+        "statement": "A duplicate key now compiles into a formatter that drops data",
+        "refs": [
+          "run:generated-dup-string-keys-fields:generated:both:differs",
+          "run:generated-dup-string-keys-fields:rtGenerated:after:any"
+        ]
+      },
+      {
+        "severity": "CAUTION",
+        "statement": "PLANTED: wrong direction. Claims the suppressed duplicate-int case now generates files.",
+        "refs": [
+          "run:suppressed-dup-int-keys:generated:both:differs"
+        ]
+      },
+      {
+        "severity": "WARNING",
+        "statement": "Code-only warning: the guard skips a colliding member.",
+        "refs": [
+          "code:src/MessagePack.SourceGenerator/CodeAnalysis/TypeCollector.cs:1023-1026"
+        ]
+      },
+      {
+        "severity": "NOTE",
+        "statement": "Valid types are unaffected. The control input behaves the same on both sides.",
+        "refs": [
+          "run:suppressed-valid-control:rtDefault:both:same"
+        ]
+      }
+    ],
+    "decisions": [
+      {
+        "question": "Is \"first member wins\" acceptable for duplicate keys?",
+        "reason": "trade-off",
+        "detail": "The generator now emits a formatter that keeps the first member; MsgPack005 still fails the build.",
+        "wouldSettleIt": "A maintainer decision on generator behaviour for invalid types.",
+        "options": [
+          "Keep it while MsgPack005 stays an error",
+          "Skip invalid types in the generator"
+        ],
+        "refs": [
+          "run:generated-dup-string-keys-fields:rtGenerated:after:any"
+        ]
+      }
+    ],
+    "notChecked": [
+      {
+        "item": "Map-mode execution",
+        "reason": "no scenario uses map mode at run time",
+        "riskIfWrong": "string-keyed types behave differently",
+        "howToCheck": "run MessagePack.SourceGenerator.MapModeExecutionTests"
+      }
+    ],
+    "requirements": [
+      {
+        "id": "R1",
+        "verdict": "met",
+        "note": "Duplicate keys no longer crash the collector.",
+        "refs": [
+          "run:generated-dup-string-keys-fields:model:both:differs"
+        ]
+      },
+      {
+        "id": "R2",
+        "verdict": "met",
+        "note": "Only read in the code.",
+        "refs": [
+          "code:src/MessagePack.SourceGenerator/CodeAnalysis/TypeCollector.cs:1023-1026"
+        ]
+      }
     ]
   }
 }

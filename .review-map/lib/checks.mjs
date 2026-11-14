@@ -68,28 +68,178 @@ export function sensitivity({ tests, after, mutant, handoffs }) {
   return { ran: true, description: m.description, file: m.file, scenarios: rows.length, detected: hit.length, where, rows };
 }
 
-/** Items for "Start here" that the script derives itself; the reviewing agent cannot remove or word them. */
-export function computedAttention({ tests, blob }) {
+// ---- what the script finds, refuses to decide, and leaves unchecked, by rule ----------------------
+
+const testShort = (name) => code(name.split('(')[0].split('.').pop());
+
+/** Findings the script derives from the test runs; the reviewing agent cannot word or remove them. */
+export function computedFound({ tests }) {
   const items = [];
-  const weak = (tests.newTests ?? []).filter((t) => t.verdict === 'passes-both');
-  const total = (tests.newTests ?? []).length;
+  const all = tests.newTests ?? [];
+  const weak = all.filter((t) => t.verdict === 'passes-both');
   if (weak.length) {
     items.push({
-      level: 'WARNING',
-      title: `${weak.length} of ${total} new tests pass on the old code too`,
-      detail: `These tests pass with the PR's source changes reverted, so they do not show that the change works: ${weak.map((t) => code(t.name.split('(')[0].split('.').pop())).join(', ')}.`,
+      severity: 'WARNING',
+      statement: `${weak.length} of ${all.length} new tests also pass on the old code, so they do not test this change: ${weak.map((t) => testShort(t.name)).join(', ')}.`,
+      computed: true,
     });
   }
-  const broken = (tests.newTests ?? []).filter((t) => t.verdict === 'fails-after');
-  if (broken.length) items.push({ level: 'CAUTION', title: `${broken.length} new tests fail on this PR`, detail: broken.map((t) => code(t.name)).join(', ') });
+  const broken = all.filter((t) => t.verdict === 'fails-after');
+  if (broken.length) items.push({ severity: 'CAUTION', statement: `${broken.length} new tests fail on this PR: ${broken.map((t) => testShort(t.name)).join(', ')}.`, computed: true });
+  return items;
+}
+
+/**
+ * Was the issue's reported bug visible on the code before the PR? The symptom was stated in the plan,
+ * before anything ran; here it is looked up in the recording of each scenario marked as the issue's
+ * reproduction.
+ */
+export function reproduction({ plan, before, handoffs }) {
+  const symptom = plan.symptom ?? { contains: [] };
+  const repros = (plan.scenarios ?? []).filter((s) => s.reproducesIssue);
+  if (!symptom.contains?.length) return { status: 'no-symptom', symptom, rows: [] };
+  if (!repros.length) return { status: 'no-repro', symptom, rows: [] };
+  const h = handoffs.find((x) => x.id === symptom.handoff);
+  if (!h) return { status: 'bad-symptom', symptom, rows: [], reason: `the plan names no hand-off called ${code(symptom.handoff)}` };
+  const rows = repros.map((s) => {
+    const b = before.find((x) => x.id === s.id);
+    if (!b || b.probeError) return { id: s.id, ran: false, seen: false };
+    const text = `${h.brief(b)}\n${h.cell(b).show}`.toLowerCase();
+    const hit = symptom.contains.find((c) => text.includes(c.toLowerCase()));
+    return { id: s.id, ran: true, seen: Boolean(hit), match: hit ?? null, value: h.brief(b) };
+  });
+  const status = rows.some((r) => r.seen) ? 'reproduced' : rows.some((r) => r.ran) ? 'unreproduced' : 'not-run';
+  return { status, symptom, node: h.node, rows };
+}
+
+/** Decisions the script opens by rule, independent of the reviewing agent's judgement. */
+export function ruleDecisions({ repro, issueRef }) {
+  if (!issueRef) return [];
+  const what = issueRef ? `the issue ${code(issueRef)}` : 'the reported bug';
+  const symptomText = repro.symptom?.contains?.map(code).join(' or ');
+  const base = { reason: 'unreproduced', computed: true, refs: [] };
+  if (repro.status === 'unreproduced') {
+    const shown = repro.rows.filter((r) => r.ran).map((r) => `${code(r.id)} shows ${code(r.value)} at ${repro.node}`).join('; ');
+    return [{
+      ...base,
+      question: `Does this PR fix ${what}?`,
+      detail: `The plan predicted the bug would show as ${symptomText} at ${repro.node} on the code before the PR. The issue's reproduction does not show it there (${shown}), so the review cannot say the PR fixes it.`,
+      wouldSettleIt: "The reporter's own reproduction, or a scenario that shows the reported symptom on the base code.",
+      options: ['Ask the reporter for their exact project or repro', 'Accept the PR as fixing a related crash, and keep the issue open'],
+      refs: repro.rows.filter((r) => r.ran).map((r) => `run:${r.id}:${repro.symptom.handoff}:before:any`),
+    }];
+  }
+  if (repro.status === 'no-repro' || repro.status === 'not-run' || repro.status === 'bad-symptom') {
+    return [{
+      ...base,
+      question: `Does this PR fix ${what}?`,
+      detail: repro.status === 'no-repro' ? "No scenario reproduces the issue's own report, so the review cannot say the PR fixes it." : repro.status === 'not-run' ? "The issue's reproduction did not run on the code before the PR." : `The expected symptom could not be checked: ${repro.reason}.`,
+      wouldSettleIt: "A scenario that shows the reported symptom on the base code, or the reporter's confirmation.",
+      options: ['Add the reporter\'s reproduction and re-run the review', 'Confirm with the reporter'],
+    }];
+  }
+  return [];
+}
+
+/**
+ * The requirement table: each requirement from the plan, the scenarios that cover it with what they
+ * recorded, and the reviewing agent's verdict after the gate. Rules applied here:
+ *   - a requirement no scenario covers (or none that ran) gets "not shown";
+ *   - when the issue was not reproduced, a primary requirement cannot be "met".
+ */
+export function requirementTable({ plan, verdicts, before, after, handoffs, repro }) {
+  const downgraded = [];
+  const rows = (plan.requirements ?? []).map((r) => {
+    const covers = (plan.scenarios ?? [])
+      .filter((s) => s.covers?.includes(r.id))
+      .map((s) => {
+        const b = before.find((x) => x.id === s.id);
+        const f = after.find((x) => x.id === s.id);
+        const ran = Boolean(b && f && !b.probeError && !f.probeError);
+        return { id: s.id, ran, differs: ran ? handoffs.filter((h) => h.cell(b).key !== h.cell(f).key).map((h) => h.node.split(' ')[0]) : [] };
+      });
+    const v = verdicts.find((x) => x.id === r.id) ?? { verdict: 'not-shown', note: 'The reviewing agent gave no verdict.', refs: [] };
+    let { verdict, note } = v;
+    let rule = null;
+    if (!covers.some((c) => c.ran)) {
+      rule = covers.length ? 'the scenarios that cover it did not run' : 'no scenario covers it';
+    } else if (r.primary && verdict === 'met' && repro && !['reproduced', 'no-symptom'].includes(repro.status)) {
+      rule = 'the reported bug was never reproduced on the code before the PR';
+    }
+    if (rule && verdict !== 'not-shown') {
+      downgraded.push(`${r.id} "${r.statement}": marked ${verdict}, but ${rule}, so it is shown as not shown`);
+      verdict = 'not-shown';
+    }
+    return { id: r.id, statement: r.statement, primary: r.primary, covers, verdict, note, refs: v.refs ?? [], rule };
+  });
+  return { rows, downgraded };
+}
+
+/** Not-checked items the script derives: coverage gaps, uncovered requirements, scenarios and test projects that did not run. */
+export function computedNotChecked({ tests, blob, requirements, failedScenarios, otherTestProjects }) {
+  const items = [];
   const c = tests.coverage;
   if (c?.measured) {
     const gaps = c.files.flatMap((f) =>
       f.inReport ? f.unreached.map(([a, b]) => `[${f.path.split('/').pop()} ${a === b ? a : `${a}–${b}`}](${blob}/${f.path}#L${a}${b > a ? `-L${b}` : ''})`) : [`${code(f.path)} (not in the coverage report)`],
     );
-    if (gaps.length) items.push({ level: 'IMPORTANT', title: `${c.executable - c.reached} of ${c.executable} changed lines never ran`, detail: `No scenario and no test reached: ${gaps.join(', ')}. Nothing in this review shows what those lines do.` });
+    if (gaps.length) {
+      items.push({
+        item: `${c.executable - c.reached} of ${c.executable} changed lines: ${gaps.join(', ')}`,
+        reason: 'no scenario and no test ran them (code coverage)',
+        riskIfWrong: 'whatever those lines do is not shown anywhere in this review',
+        howToCheck: 'add a scenario that reaches them, or a test, and re-run the review',
+        computed: true,
+      });
+    }
+  } else {
+    items.push({ item: 'Which changed lines ran', reason: c?.reason ?? 'coverage was not recorded', riskIfWrong: 'untested lines go unnoticed', howToCheck: 're-run with code coverage', computed: true });
+  }
+  for (const r of requirements.filter((x) => x.rule && x.rule !== 'the reported bug was never reproduced on the code before the PR')) {
+    items.push({
+      item: `${r.id}: ${r.statement}`,
+      reason: r.rule,
+      riskIfWrong: r.primary ? 'this is the bug the issue reports' : 'this part of the issue may not be met',
+      howToCheck: 'add a scenario that covers it and re-run the review',
+      computed: true,
+    });
+  }
+  if (failedScenarios.length) {
+    items.push({ item: `Scenarios ${failedScenarios.map(code).join(', ')}`, reason: 'they could not run', riskIfWrong: 'what they were meant to show is unknown', howToCheck: 'fix the scenario code and re-run', computed: true });
+  }
+  if (otherTestProjects.length) {
+    const touched = otherTestProjects.filter((p) => p.touched);
+    items.push({
+      item: `${otherTestProjects.length} other test projects: ${otherTestProjects.map((p) => code(p.name) + (p.touched ? ' (changed by this PR)' : '')).join(', ')}`,
+      reason: `only ${code(tests.project.split('/').pop())} was run`,
+      riskIfWrong: touched.length ? 'this PR changes files in some of them, so their results matter' : 'a regression elsewhere in the library would go unnoticed',
+      howToCheck: `dotnet test ${touched[0]?.path ?? otherTestProjects[0].path}`,
+      computed: true,
+    });
   }
   return items;
+}
+
+/**
+ * Who owns a refused decision. Only people a human named get an @-mention: the REVIEW_MAP_OWNERS
+ * setting ("alice,bob" or "intent=alice,trade-off=bob,default=carol"), then the PR's requested
+ * reviewers and assignees. The PR author is not used: here that is the agent's operator, not a reviewer.
+ */
+export function ownerResolver({ setting, pr }) {
+  const map = {};
+  const plain = [];
+  for (const part of String(setting ?? '').split(',').map((x) => x.trim()).filter(Boolean)) {
+    const [k, v] = part.includes('=') ? part.split('=').map((x) => x.trim()) : [null, part];
+    const login = v.replace(/^@/, '');
+    if (k) map[k] = login;
+    else plain.push(login);
+  }
+  const fromPr = [...(pr?.reviewers ?? []), ...(pr?.assignees ?? [])];
+  return (reason) => {
+    const login = map[reason] ?? map.default ?? plain[0] ?? fromPr[0];
+    if (login) return { login, source: map[reason] || map.default || plain[0] ? 'REVIEW_MAP_OWNERS' : 'PR reviewers' };
+    return { login: null, source: 'unassigned' };
+  };
 }
 
 export function fingerprints(files) {
