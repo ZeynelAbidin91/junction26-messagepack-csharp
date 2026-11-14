@@ -68,6 +68,50 @@ export function sensitivity({ tests, after, mutant, handoffs }) {
   return { ran: true, description: m.description, file: m.file, scenarios: rows.length, detected: hit.length, where, rows };
 }
 
+// ---- which part of the change causes what (per-hunk builds) -------------------------------------
+
+/** Recorded runs of the PR minus each hunk group, as extra sides that evidence pointers can cite. */
+export function ablationSides(tests, load) {
+  const ab = tests.ablation;
+  if (!ab?.ran) return {};
+  const label = (g) => `without ${g.hunks.map((id) => ab.hunks.find((h) => h.id === id)?.label ?? id).join(' + ')}`;
+  return Object.fromEntries(ab.groups.filter((g) => g.probe === 'ok').map((g) => [`without-${g.id}`, { label: label(g), runs: load(`probe-without-${g.id}.json`) }]));
+}
+
+/**
+ * For each hunk group: at the hand-offs where the PR changes something, does removing the group bring the
+ * before value back (needed), leave the after value (not needed), or give a third value (partly)? Also
+ * where removing it changes a hand-off the PR itself leaves alone.
+ */
+export function ablationEffects({ tests, before, after, sides, handoffs }) {
+  const ab = tests.ablation;
+  if (!ab?.ran) return { ran: false, reason: ab?.reason ?? 'per-hunk builds were not run', groups: [] };
+  const groups = ab.groups.map((g) => {
+    const side = sides[`without-${g.id}`];
+    const hunks = g.hunks.map((id) => ab.hunks.find((h) => h.id === id)).filter(Boolean);
+    const out = { id: g.id, side: `without-${g.id}`, hunks, build: g.build, errors: g.errors ?? [], needed: [], partly: [], notNeeded: [], sideEffects: [] };
+    if (!side) return out;
+    for (const f of after) {
+      const b = before.find((x) => x.id === f.id);
+      const w = side.runs.find((x) => x.id === f.id);
+      if (!b || !w || b.probeError || f.probeError || w.probeError) continue;
+      for (const h of handoffs) {
+        const kb = h.cell(b).key;
+        const ka = h.cell(f).key;
+        const kw = h.cell(w).key;
+        const at = { scenario: f.id, handoff: h.id, node: h.node };
+        if (kb === ka) {
+          if (kw !== ka) out.sideEffects.push(at);
+        } else if (kw === kb) out.needed.push(at);
+        else if (kw === ka) out.notNeeded.push(at);
+        else out.partly.push(at);
+      }
+    }
+    return out;
+  });
+  return { ran: true, groups, runs: ab.runs };
+}
+
 // ---- what the script finds, refuses to decide, and leaves unchecked, by rule ----------------------
 
 const testShort = (name) => code(name.split('(')[0].split('.').pop());
@@ -184,8 +228,28 @@ export function requirementTable({ plan, verdicts, before, after, handoffs, repr
 }
 
 /** Not-checked items the script derives: coverage gaps, uncovered requirements, scenarios and test projects that did not run. */
-export function computedNotChecked({ tests, blob, requirements, failedScenarios, otherTestProjects }) {
+export function computedNotChecked({ tests, blob, requirements, failedScenarios, otherTestProjects, effects }) {
   const items = [];
+  const link = (h) => (h.whole ? code(h.file) : `[${h.label}](${blob}/${h.file}#L${h.newStart}${h.newCount > 1 ? `-L${h.newStart + h.newCount - 1}` : ''})`);
+  for (const g of effects?.groups ?? []) {
+    if (g.build !== 'ok') {
+      items.push({
+        item: `What ${g.hunks.map(link).join(' + ')} does on its own`,
+        reason: `the PR without ${g.hunks.length > 1 ? 'these parts' : 'this part'} did not build${g.errors[0] ? ` (${code(`${g.errors[0].code}: ${g.errors[0].message}`.slice(0, 120))})` : ''}`,
+        riskIfWrong: 'its effect cannot be separated from the rest of the change',
+        howToCheck: 'read these hunks together with the code that uses them',
+        computed: true,
+      });
+    } else if (!g.needed.length && !g.partly.length && !g.sideEffects.length) {
+      items.push({
+        item: `What ${g.hunks.map(link).join(' + ')} does`,
+        reason: 'removing it from the PR changes nothing in any input that ran, so no input shows what it does (the lines may still run, with the same result either way)',
+        riskIfWrong: 'whatever this part changes is not shown anywhere in this review',
+        howToCheck: 'add an input whose result differs with and without these lines, or a test that fails without them',
+        computed: true,
+      });
+    }
+  }
   const c = tests.coverage;
   if (c?.measured) {
     const gaps = c.files.flatMap((f) =>

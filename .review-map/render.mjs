@@ -193,6 +193,37 @@ export async function render(a, { analysisDir = '.' } = {}) {
     p('');
   }
 
+  // ---- which part of the change causes what (per-hunk builds) ---------------------------------------
+  if (a.effects?.ran && a.effects.groups.length) {
+    const blob = a.pr.blob;
+    const hunkLink = (h) => (h.whole || !blob ? code(h.label) : `[${h.label}](${blob}/${h.file}#L${h.newStart}${h.newCount > 1 ? `-L${h.newStart + h.newCount - 1}` : ''})`);
+    const at = (list) => {
+      const by = new Map();
+      for (const x of list) by.set(x.scenario, [...(by.get(x.scenario) ?? []), x.node.split(' ')[0]]);
+      return [...by].map(([s, ns]) => `[${code(s)}](#user-content-trace-${s}) ${[...new Set(ns)].join(' ')}`).join('<br>');
+    };
+    p('### Which part of the change causes what');
+    p('');
+    p(`The script built the PR again with one part removed at a time and ran every input through it (${count(a.effects.runs, 'extra build', 'extra builds')}). Where the PR changes a hand-off, **needed** means removing the part brings the old value back, so this part causes it. A part other changed lines depend on cannot be removed alone; the compiler names the lines that need it, and those parts are removed with it.`);
+    p('');
+    p('| Part of the change (removed) | Build | Needed for | Partly needed for | Not needed for |');
+    p('|---|---|---|---|---|');
+    for (const g of a.effects.groups) {
+      const parts = g.hunks.map(hunkLink).join(' +<br>');
+      if (g.build !== 'ok') {
+        const err = g.errors?.[0] ? `<br><sub>${cell(`${g.errors[0].code}: ${g.errors[0].message}`.slice(0, 100))}</sub>` : '';
+        p(`| ${parts} | did not build${err} | | | |`);
+        continue;
+      }
+      const none = !g.needed.length && !g.partly.length && !g.sideEffects.length;
+      const side = g.sideEffects.length ? `<br><sub>removing it also changes: ${at(g.sideEffects)}</sub>` : '';
+      p(`| ${parts} | ok | ${g.needed.length ? at(g.needed) : none ? '**nothing: no input shows what it does**' : '–'}${side} | ${at(g.partly) || '–'} | ${at(g.notNeeded) || '–'} |`);
+    }
+    p('');
+    p('<sub>① model · ② diagnostics · ③ C# files · ④ run time. Each cell links to that input\'s trace. Computed by the script from the extra builds; the reviewing agent cannot word this table.</sub>');
+    p('');
+  }
+
   // ---- pipeline map -----------------------------------------------------------------------
   p('### The change as a pipeline');
   p('');

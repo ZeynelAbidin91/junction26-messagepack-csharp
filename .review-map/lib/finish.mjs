@@ -4,6 +4,7 @@
 
 import {
   computedFound,
+  ablationEffects,
   computedNotChecked,
   confidence,
   ownerResolver,
@@ -73,7 +74,8 @@ export function finishAnalysis(a, { plan, issueRef, pr, tests, before, after, mu
 
   const ran = after.filter((s) => !s.probeError).map((s) => s.id);
   const failedScenarios = (plan.scenarios ?? []).filter((s) => !ran.includes(s.id)).map((s) => s.id);
-  const notChecked = [...computedNotChecked({ tests, blob, requirements: table.rows, failedScenarios, otherTestProjects }), ...(v.notChecked ?? [])];
+  const effects = ablationEffects({ tests, before, after, sides: extraSides ?? {}, handoffs });
+  const notChecked = [...computedNotChecked({ tests, blob, requirements: table.rows, failedScenarios, otherTestProjects, effects }), ...(v.notChecked ?? [])];
 
   const owner = ownerResolver({ setting: ownersSetting, pr });
   for (const d of v.decisions) d.owner = owner(d.reason);
@@ -105,6 +107,7 @@ export function finishAnalysis(a, { plan, issueRef, pr, tests, before, after, mu
     traceCases,
     failedScenarios,
     sensitivity: sens,
+    effects,
     confidence: confidence({ tests, failedScenarios, sensitivity: sens }),
   };
 }

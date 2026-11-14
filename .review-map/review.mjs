@@ -25,7 +25,7 @@ import { parseArgs } from 'node:util';
 import { ask } from './lib/claude.mjs';
 import { budgetedDiff, linkedIssue, mergeBaseOf, pullRequest } from './lib/context.mjs';
 import { collectEvidence } from './lib/evidence.mjs';
-import { fingerprints, reproduction } from './lib/checks.mjs';
+import { ablationEffects, ablationSides, fingerprints, reproduction } from './lib/checks.mjs';
 import { finishAnalysis } from './lib/finish.mjs';
 import { Analysis, AnalysisMap, AnalysisTop, Plan } from './lib/schemas.mjs';
 import { MARKER, render } from './render.mjs';
@@ -163,6 +163,7 @@ In this step you explain the change from evidence. You get the diff, the probe r
 
 You never write evidence values yourself; you point at them. A script resolves every pointer (a "ref") against the recordings and quotes the values next to your words. An item whose refs do not resolve, or resolve to something other than what its "expects" says, is moved out of the main comment into an "unverified" section. A ref is one string in one of three forms:
 - "run:<scenario>:<handoff>:<side>:<expects>": scenario is an id from <probe_results>; handoff is one of ${HANDOFFS.map((h) => `${h.id} (${h.label})`).join(', ')}; side is before, after or both; with side both, expects says whether that hand-off differs between before and after or is the same (any if it does not matter). Example: "run:dup-keys:generated:both:differs".
+- The side can also be "without-<group>" for a recorded run of the PR with one part removed (see perHunkBuilds in <script_findings>), with expects any; for example "run:dup-keys:model:without-H3:any" shows what the model is without hunk H3. Use these to say which part of the change causes an effect.
 - "test:<name>:<expects>": name is from <test_names> (the full name, or Class.Method for all its cases); expects is fails-before-passes-after, passes-both, fails-after or any.
 - "code:<path>:<start>-<end>": lines in the head commit, for what you read in the code rather than saw in a run. Example: "code:src/Foo/Bar.cs:120-124".
 Prefer run and test refs; a claim backed only by code refs is shown as "holds in the code, not run".
@@ -199,7 +200,7 @@ ${JSON.stringify((plan.requirements ?? []).map((r) => ({ ...r, coveredBy: plan.s
 </requirements>
 
 <script_findings note="Computed by a script from the runs and shown in the comment as they are.">
-${JSON.stringify({ issueReproduction: reproduction({ plan, before, after, handoffs: HANDOFFS }), newTests: testSummary.newTests, changedLineCoverage: testSummary.coverage }, null, 1)}
+${JSON.stringify({ issueReproduction: reproduction({ plan, before, after, handoffs: HANDOFFS }), perHunkBuilds: (() => { const e = ablationEffects({ tests, before, after, sides: ablationSides(tests, load), handoffs: HANDOFFS }); return e.ran ? e.groups.map((g) => ({ group: g.id, hunks: g.hunks.map((h) => h.label), build: g.build, neededFor: g.needed.map((x) => `${x.scenario} ${x.handoff}`), partlyFor: g.partly.map((x) => `${x.scenario} ${x.handoff}`), notNeededFor: g.notNeeded.map((x) => `${x.scenario} ${x.handoff}`), changesOnlyWithout: g.sideEffects.map((x) => `${x.scenario} ${x.handoff}`) })) : e.reason; })(), newTests: testSummary.newTests, changedLineCoverage: testSummary.coverage }, null, 1)}
 </script_findings>
 
 Write the review map.`;
@@ -245,7 +246,7 @@ Write the review map.`;
     before,
     after,
     mutant,
-    extraSides: {},
+    extraSides: ablationSides(tests, load),
     handoffs: HANDOFFS,
     readCode,
     blob,
@@ -294,8 +295,9 @@ Write the review map.`;
     claims: verified.claims,
     unverified,
     sensitivity: fin.sensitivity,
+    effects: fin.effects,
     integrity: {
-      files: fingerprints([resolve(out, 'scenarios.json'), ev('probe-before.json'), ev('probe-after.json'), ev('probe-mutant.json'), ev('tests.json')]),
+      files: fingerprints([resolve(out, 'scenarios.json'), ev('probe-before.json'), ev('probe-after.json'), ev('probe-mutant.json'), ev('tests.json'), ...(tests.ablation?.groups ?? []).filter((g) => g.probe === 'ok').map((g) => ev(`probe-without-${g.id}.json`))]),
       artifact,
       replay: runId
         ? `node .review-map/review.mjs replay --run ${runId} --scenario {id} --repo <checkout of ${ctx.head.slice(0, 8)}>`

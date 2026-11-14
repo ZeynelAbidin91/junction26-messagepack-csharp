@@ -9,7 +9,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { fingerprints } from '../lib/checks.mjs';
+import { ablationSides, fingerprints } from '../lib/checks.mjs';
 import { finishAnalysis } from '../lib/finish.mjs';
 
 const code = (s) => '`' + String(s).replace(/`/g, "'") + '`';
@@ -55,7 +55,7 @@ const fin = finishAnalysis(src, {
   before,
   after,
   mutant: load('probe-mutant.json'),
-  extraSides: Object.fromEntries((src.traces.variants ?? []).map((v) => [v.side, { label: v.label, runs: load(v.file) }])),
+  extraSides: { ...Object.fromEntries((src.traces.variants ?? []).map((v) => [v.side, { label: v.label, runs: load(v.file) }])), ...ablationSides(tests, load) },
   handoffs: H,
   readCode,
   blob: src.pr.blob,
@@ -74,8 +74,9 @@ const outA = {
   tests: testSummary,
   unverified: fin.unverified,
   sensitivity: fin.sensitivity,
+  effects: fin.effects,
   integrity: {
-    files: fingerprints(['scenarios.json', 'probe-before.json', 'probe-after.json', 'probe-mutant.json', 'tests.json', ...(src.traces.variants ?? []).map((x) => x.file)].map((f) => resolve(dir, f))),
+    files: fingerprints(['scenarios.json', 'probe-before.json', 'probe-after.json', 'probe-mutant.json', 'tests.json', ...(src.traces.variants ?? []).map((x) => x.file), ...(tests.ablation?.groups ?? []).filter((g) => g.probe === 'ok').map((g) => `probe-without-${g.id}.json`)].map((f) => resolve(dir, f))),
     artifact: null,
     replay: src.replay ?? null,
   },

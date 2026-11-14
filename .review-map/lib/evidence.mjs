@@ -205,6 +205,142 @@ function changedLineCoverage({ repo, mergeBase, head, src, probeFiles, testFiles
   };
 }
 
+// ---- per-hunk builds: the PR minus one part, to show which part causes which effect -------------
+
+/** The PR's source hunks with their old and new lines (diff -U0). Added and deleted files are one hunk each. */
+function sourceHunks(repo, mergeBase, head, src) {
+  const hunks = [];
+  for (const f of src.filter((x) => x.path.endsWith('.cs'))) {
+    if (f.status === 'A' || f.status === 'D') {
+      hunks.push({ file: f.path, whole: f.status, newStart: 1, newCount: 0, oldStart: 1, oldCount: 0 });
+      continue;
+    }
+    const diff = git(repo, 'diff', '-U0', '--no-renames', mergeBase, head, '--', f.path);
+    let cur = null;
+    for (const line of diff.split('\n')) {
+      const h = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(line);
+      if (h) {
+        cur = { file: f.path, oldStart: Number(h[1]), oldCount: h[2] === undefined ? 1 : Number(h[2]), newStart: Number(h[3]), newCount: h[4] === undefined ? 1 : Number(h[4]), oldLines: [], newLines: [] };
+        hunks.push(cur);
+      } else if (cur && line.startsWith('-') && !line.startsWith('---')) cur.oldLines.push(line.slice(1));
+      else if (cur && line.startsWith('+') && !line.startsWith('+++')) cur.newLines.push(line.slice(1));
+    }
+  }
+  return hunks.map((h, i) => ({ ...h, id: `H${i + 1}` }));
+}
+
+const hunkLabel = (h) => (h.whole ? `${h.file.split('/').pop()} (${h.whole === 'A' ? 'new file' : 'deleted file'})` : `${h.file.split('/').pop()} ${h.newCount <= 1 ? h.newStart : `${h.newStart}–${h.newStart + h.newCount - 1}`}`);
+
+/**
+ * Writes the head version of every file the group touches with the group's hunks reverted, and returns,
+ * per file, a map from a line of the written file to its line in the head file (null for reverted lines).
+ */
+function writeAblation(repo, head, mergeBase, group) {
+  const maps = {};
+  for (const file of [...new Set(group.map((h) => h.file))]) {
+    const hs = group.filter((h) => h.file === file);
+    const whole = hs.find((h) => h.whole);
+    const target = join(repo, file);
+    if (whole?.whole === 'A') {
+      rmSync(target, { force: true });
+      maps[file] = null;
+      continue;
+    }
+    if (whole?.whole === 'D') {
+      writeFileSync(target, git(repo, 'show', `${mergeBase}:${file}`) + '\n');
+      maps[file] = null;
+      continue;
+    }
+    const lines = git(repo, 'show', `${head}:${file}`).split('\n');
+    // Each entry: the line text and the head line number it came from (null when it is a reverted old line).
+    let out = lines.map((t, i) => ({ t, n: i + 1 }));
+    for (const h of [...hs].sort((a, b) => b.newStart - a.newStart)) {
+      const at = h.newCount === 0 ? h.newStart : h.newStart - 1; // a pure deletion re-inserts after line newStart
+      out.splice(at, h.newCount, ...h.oldLines.map((t) => ({ t, n: null })));
+    }
+    writeFileSync(target, out.map((x) => x.t).join('\n'));
+    maps[file] = out.map((x) => x.n);
+  }
+  return maps;
+}
+
+/** Compiler errors in a build log, mapped to the PR hunk whose head lines they fall in. */
+export function errorsToHunks(log, repo, hunks, maps) {
+  const found = [];
+  const norm = (p) => p.replace(/\\/g, '/').toLowerCase();
+  const root = norm(resolve(repo)) + '/';
+  for (const m of log.matchAll(/^\s*(.+?\.cs)\((\d+),\d+\): error (CS\d+): ([^\r\n[]*)/gm)) {
+    let p = norm(m[1]);
+    if (p.startsWith(root)) p = p.slice(root.length);
+    const file = hunks.find((h) => norm(h.file) === p || p.endsWith('/' + norm(h.file)))?.file ?? p;
+    const line = Number(m[2]);
+    const map = maps[file];
+    const headLine = map ? map[line - 1] : map === undefined ? line : null;
+    const hunk = headLine == null ? null : hunks.find((h) => h.file === file && !h.whole && headLine >= h.newStart && headLine < h.newStart + Math.max(h.newCount, 1));
+    found.push({ file, line, code: m[3], message: m[4].trim(), hunk: hunk?.id ?? null });
+  }
+  const seen = new Set();
+  return found.filter((e) => !seen.has(`${e.file}:${e.line}:${e.code}`) && seen.add(`${e.file}:${e.line}:${e.code}`));
+}
+
+/**
+ * For each source hunk, builds the PR without it and runs the probe. A hunk other changed lines depend on
+ * cannot be removed alone: the compiler errors name the lines that need it, and the hunks holding those
+ * lines join the group, until the build passes. Leaves every file as it was in head.
+ */
+function ablate({ repo, adapter, mergeBase, head, src, scenariosFile, outDir, touched, maxHunks = 12, maxRuns = 12 }) {
+  const hunks = sourceHunks(repo, mergeBase, head, src);
+  if (!hunks.length) return { ran: false, reason: 'the PR changes no source file' };
+  if (hunks.length > maxHunks) return { ran: false, reason: `the PR has ${hunks.length} source hunks; per-hunk builds run for up to ${maxHunks}`, hunks: hunks.length };
+  const restore = () => {
+    for (const f of new Set(hunks.map((h) => h.file))) {
+      const r = sh('git', ['checkout', head, '--', f], { cwd: repo });
+      if (r.status !== 0) rmSync(join(repo, f), { force: true });
+    }
+  };
+  for (const h of hunks) touched.add(h.file);
+  const groups = [];
+  let runs = 0;
+  try {
+    for (const start of hunks) {
+      let set = [start];
+      for (let round = 0; round < 4; round++) {
+        const key = set.map((h) => h.id).sort().join('+');
+        const known = groups.find((g) => g.id === key);
+        if (known) break;
+        if (runs >= maxRuns) {
+          groups.push({ id: key, hunks: set.map((h) => h.id), build: 'not run', reason: `limit of ${maxRuns} builds reached` });
+          break;
+        }
+        runs++;
+        restore();
+        const maps = writeAblation(repo, head, mergeBase, set);
+        const run = runProbe(repo, adapter, scenariosFile, outDir, `without-${key}`);
+        if (run.probe === 'ok') {
+          groups.push({ id: key, hunks: set.map((h) => h.id), build: 'ok', probe: 'ok' });
+          break;
+        }
+        const log = existsSync(resolve(outDir, `probe-without-${key}.log`)) ? readFileSync(resolve(outDir, `probe-without-${key}.log`), 'utf8') : '';
+        const errors = errorsToHunks(log, repo, hunks, maps);
+        const add = [...new Set(errors.map((e) => e.hunk).filter((id) => id && !set.some((h) => h.id === id)))];
+        if (!add.length || round === 3) {
+          groups.push({ id: key, hunks: set.map((h) => h.id), build: run.probe === 'build failed' ? 'failed' : run.probe, errors: errors.slice(0, 3) });
+          break;
+        }
+        set = [...set, ...hunks.filter((h) => add.includes(h.id))].sort((a, b) => hunks.indexOf(a) - hunks.indexOf(b));
+      }
+    }
+  } finally {
+    restore();
+  }
+  return {
+    ran: true,
+    hunks: hunks.map((h) => ({ id: h.id, file: h.file, label: hunkLabel(h), newStart: h.newStart, newCount: h.newCount, oldCount: h.oldCount, whole: h.whole ?? null, added: (h.newLines ?? []).slice(0, 4) })),
+    groups,
+    runs,
+  };
+}
+
 /** Test methods the PR adds, read from the added lines of its test files. */
 function newTestMethods(repo, mergeBase, head, tests) {
   const paths = tests.filter((f) => f.status !== 'D' && f.path.endsWith('.cs')).map((f) => f.path);
@@ -314,6 +450,9 @@ export function collectEvidence({ repo, adapter, mergeBase, head, scenariosFile,
       }
     }
 
+    // The PR minus one part at a time, probe only, to show which part of the change causes which effect.
+    const ablation = ablate({ repo, adapter, mergeBase, head, src, scenariosFile, outDir, touched });
+
     // Before: revert only the source files, so the PR's new tests run against the old code.
     // If that does not build (the tests use something the PR added), revert the tests as well.
     revert(src);
@@ -347,6 +486,7 @@ export function collectEvidence({ repo, adapter, mergeBase, head, scenariosFile,
       probe: { after: afterProbe.probe, before: beforeProbe.probe },
       coverage,
       mutation,
+      ablation,
       sdk,
       pinnedSdk,
       rollForwardSdk,

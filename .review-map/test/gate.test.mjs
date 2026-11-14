@@ -163,3 +163,35 @@ test('SDK pin check follows global.json rollForward rules', () => {
   assert.equal(sdkSatisfies('9.0.301', { ...pin, rollForward: 'latestMajor' }), true);
   assert.equal(sdkSatisfies('8.0.401', pin), false);
 });
+
+test('per-hunk builds: compiler errors map back to the PR hunk that holds the failing line', async () => {
+  const { errorsToHunks } = await import('../lib/evidence.mjs');
+  const hunks = [
+    { id: 'H1', file: 'src/A.cs', newStart: 239, newCount: 1 },
+    { id: 'H2', file: 'src/A.cs', newStart: 985, newCount: 1 },
+    { id: 'H4', file: 'src/A.cs', newStart: 1429, newCount: 23 },
+  ];
+  // H4 (23 added lines) was removed, so written line 1429 is head line 1452, and lines before it are unchanged.
+  const map = Array.from({ length: 1500 }, (_, i) => (i + 1 < 1429 ? i + 1 : i + 1 + 23));
+  const log = String.raw`C:\repo\src\A.cs(239,96): error CS0103: The name 'ReportIfLocatedInCompilation' does not exist in the current context [C:\repo\x.csproj]
+C:\repo\src\A.cs(985,120): error CS0103: The name 'GetPropertyIdentifierLocation' does not exist in the current context [C:\repo\x.csproj]
+C:\repo\src\A.cs(239,96): error CS0103: The name 'ReportIfLocatedInCompilation' does not exist in the current context [C:\repo\y.csproj]
+C:\repo\src\A.cs(1460,5): error CS1002: ; expected`;
+  const errors = errorsToHunks(log, String.raw`C:\repo`, hunks, { 'src/A.cs': map });
+  assert.deepEqual(errors.map((x) => x.hunk), ['H1', 'H2', null], 'duplicates dropped; a line outside every hunk maps to none');
+  assert.equal(errors[0].code, 'CS0103');
+});
+
+test('per-hunk builds: removing a part is "needed" only where it brings the old value back', async () => {
+  const { ablationEffects } = await import('../lib/checks.mjs');
+  const hs = [{ id: 'm', node: '① Model', cell: (s) => ({ key: s.m }) }, { id: 'd', node: '② Diagnostics', cell: (s) => ({ key: s.d }) }];
+  const before = [{ id: 's', m: 'throws', d: 'MsgPack004' }];
+  const after = [{ id: 's', m: 'ok', d: 'none' }];
+  const tests = { ablation: { ran: true, runs: 2, hunks: [{ id: 'H1', label: 'A.cs 1' }, { id: 'H2', label: 'A.cs 2' }], groups: [{ id: 'H1', hunks: ['H1'], build: 'ok', probe: 'ok' }, { id: 'H2', hunks: ['H2'], build: 'ok', probe: 'ok' }] } };
+  const sides = { 'without-H1': { runs: [{ id: 's', m: 'throws', d: 'other' }] }, 'without-H2': { runs: [{ id: 's', m: 'ok', d: 'none' }] } };
+  const e = ablationEffects({ tests, before, after, sides, handoffs: hs });
+  const [g1, g2] = e.groups;
+  assert.deepEqual(g1.needed.map((x) => x.handoff), ['m']);
+  assert.deepEqual(g1.partly.map((x) => x.handoff), ['d']);
+  assert.deepEqual([g2.needed.length, g2.partly.length, g2.notNeeded.length], [0, 0, 2], 'a part whose removal changes nothing');
+});

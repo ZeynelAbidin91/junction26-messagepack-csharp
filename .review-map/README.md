@@ -34,6 +34,7 @@ The script also computes these, with no agent involved (`lib/checks.mjs`, `lib/e
 
 - **New tests that don't discriminate:** the PR's new tests run against the old code; any that pass there too are flagged.
 - **Changed lines that ran:** code coverage on the after side, intersected with the diff ("18 of 18 changed lines reached; not reached: …").
+- **Which part causes what:** the PR is rebuilt with each source hunk removed (up to 12 hunks and 12 builds), and every input runs through each build. A hunk other changed lines depend on is grouped with them, using the compiler's errors. For each part, the comment shows where removing it brings the old value back. A part whose removal changes nothing becomes a not-checked item.
 - **Can the probe see a break?** A fixed, known-bad mutation from the adapter is applied to the after code. The method section reports which scenarios and hand-offs light up.
 - **Reduced confidence:** an SDK that doesn't satisfy the `global.json` pin, a before side that had to revert the tests too, a side that didn't run, or a missing check. Shown at the top.
 - **Fingerprints:** SHA-256 of each evidence file and a link to the workflow artifact, in the footer.
