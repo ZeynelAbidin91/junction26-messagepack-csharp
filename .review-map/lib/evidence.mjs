@@ -335,7 +335,7 @@ function ablate({ repo, adapter, mergeBase, head, src, scenariosFile, outDir, to
   }
   return {
     ran: true,
-    hunks: hunks.map((h) => ({ id: h.id, file: h.file, label: hunkLabel(h), newStart: h.newStart, newCount: h.newCount, oldCount: h.oldCount, whole: h.whole ?? null, added: (h.newLines ?? []).slice(0, 4) })),
+    hunks: hunks.map((h) => ({ id: h.id, file: h.file, label: hunkLabel(h), newStart: h.newStart, newCount: h.newCount, oldCount: h.oldCount, whole: h.whole ?? null, added: (h.newLines ?? []).slice(0, 40), removed: (h.oldLines ?? []).slice(0, 40), moreLines: Math.max(0, (h.newLines ?? []).length - 40) + Math.max(0, (h.oldLines ?? []).length - 40) })),
     groups,
     runs,
   };

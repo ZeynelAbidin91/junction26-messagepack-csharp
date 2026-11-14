@@ -82,7 +82,7 @@ export function verifyAnalysis(a, { before, after, results, handoffs, readCode, 
       if (extra) {
         const s = find(extra.runs, r.scenario);
         if (!usable(s)) return { ok: false, reason: `scenario ${code(r.scenario)} has no usable ${extra.label} recording` };
-        return { ok: true, anchor, quote: `${code(r.scenario)} ${h.node}, ${extra.label}: ${code(short(h.brief(s)))}` };
+        return { ok: true, anchor, quote: `${code(r.scenario)} ${h.node}, ${extra.label}: ${code(short(h.brief(s)))}`, data: { kind: 'run', scenario: r.scenario, node: h.node, side: 'extra', label: extra.label, value: h.brief(s) } };
       }
       if (!['before', 'after', 'both'].includes(r.side)) return { ok: false, reason: `no recorded side called ${code(r.side)}` };
       const b = find(before, r.scenario);
@@ -93,13 +93,13 @@ export function verifyAnalysis(a, { before, after, results, handoffs, readCode, 
       const label = `${code(r.scenario)} ${h.node}`;
       if (r.side !== 'both') {
         const s = r.side === 'before' ? b : f;
-        return { ok: true, anchor, quote: `${label}, ${r.side}: ${code(short(h.brief(s)))}` };
+        return { ok: true, anchor, quote: `${label}, ${r.side}: ${code(short(h.brief(s)))}`, data: { kind: 'run', scenario: r.scenario, node: h.node, side: r.side, value: h.brief(s) } };
       }
       const differs = h.cell(b).key !== h.cell(f).key;
       const quote = differs ? `${label}: before ${code(short(h.brief(b)))} → after ${code(short(h.brief(f)))}` : `${label}: ${code(short(h.brief(f)))} on both sides`;
       if (r.expects === 'differs' && !differs) return { ok: false, anchor, quote, reason: `cited as a difference, but ${h.node} is identical before and after` };
       if (r.expects === 'same' && differs) return { ok: false, anchor, quote, reason: `cited as unchanged, but ${h.node} differs before and after` };
-      return { ok: true, anchor, quote };
+      return { ok: true, anchor, quote, data: { kind: 'run', scenario: r.scenario, node: h.node, side: 'both', differs, before: h.brief(b), after: h.brief(f) } };
     }
     if (r.kind === 'test') {
       let matches = testNames.filter((n) => n === r.test);
@@ -112,7 +112,7 @@ export function verifyAnalysis(a, { before, after, results, handoffs, readCode, 
       if (r.expects !== 'any' && !(patterns.length === 1 && patterns[0] === r.expects)) {
         return { ok: false, quote, reason: `cited as ${r.expects}, but the recorded outcome is ${patterns.join(' / ')}` };
       }
-      return { ok: true, quote };
+      return { ok: true, quote, data: { kind: 'test', name: matches.length > 1 ? `${r.test} (${matches.length} cases)` : n.split('(')[0].split('.').slice(-2).join('.'), before: results.before?.[n] ?? 'did not exist', after: results.after?.[n] ?? 'did not exist' } };
     }
     if (r.kind === 'code') {
       const text = readCode?.(r.path);
@@ -123,7 +123,8 @@ export function verifyAnalysis(a, { before, after, results, handoffs, readCode, 
       if (start < 1 || end > lines.length) return { ok: false, reason: `${code(r.path)} has ${lines.length} lines, not ${start}–${end}` };
       const first = lines.slice(start - 1, end).find((l) => l.trim()) ?? '';
       const where = `${r.path.split('/').pop()} ${start === end ? `line ${start}` : `lines ${start}–${end}`}`;
-      return { ok: true, quote: `${blob ? `[${where}](${blob}/${r.path}#L${start}${end > start ? `-L${end}` : ''})` : where}: ${code(short(first.trim(), 100))}` };
+      const url = blob ? `${blob}/${r.path}#L${start}${end > start ? `-L${end}` : ''}` : null;
+      return { ok: true, quote: `${url ? `[${where}](${url})` : where}: ${code(short(first.trim(), 100))}`, data: { kind: 'code', path: r.path, where, url, start, lines: lines.slice(start - 1, Math.min(end, start + 11)).map((l) => l.replace(/\r$/, '')) } };
     }
     return { ok: false, reason: 'unknown evidence kind' };
   };

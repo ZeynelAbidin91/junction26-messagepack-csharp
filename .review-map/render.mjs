@@ -34,6 +34,9 @@ const STATUS = {
 };
 const SEVERITY = { CAUTION: '🛑', WARNING: '⚠️', IMPORTANT: '❗', NOTE: 'ℹ️' };
 const SEVERITY_ORDER = ['CAUTION', 'WARNING', 'IMPORTANT', 'NOTE'];
+const SEVERITY_WORD = { CAUTION: 'caution', WARNING: 'warning', IMPORTANT: 'important', NOTE: 'note' };
+const SEVERITY_PLURAL = { CAUTION: 'cautions', WARNING: 'warnings', IMPORTANT: 'important', NOTE: 'notes' };
+const REASON_MEANING = { intent: 'the requirement does not say', 'trade-off': 'a policy call with no technically right answer', unreproduced: 'the reported bug never showed before the change', 'out-of-reach': 'the tools here cannot run it' };
 const REASON = { intent: '`intent`', 'trade-off': '`trade-off`', unreproduced: '`unreproduced`', 'out-of-reach': '`out-of-reach`' };
 const REQ_VERDICT = { met: '✅ met', partly: '🟡 partly', 'not-met': '❌ not met', 'not-shown': '⚠️ not shown' };
 const REPRO = {
@@ -58,174 +61,206 @@ const count = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 const quote = (r) => `${r.resolved?.quote ?? ''}${r.resolved?.anchor ? ` [↗](#user-content-${r.resolved.anchor})` : ''}`;
 const quotes = (refs) => (refs ?? []).filter((r) => r.resolved?.ok).map(quote);
 
+// ---- evidence, shown so it stands out ---------------------------------------------------------
+// Run and test evidence becomes one `diff` block (red = before the PR, green = after), code evidence a
+// `csharp` snippet under a link to the exact lines. Every value comes from the script's resolution of
+// the reviewer's pointers (lib/verify.mjs), never from the reviewer's own words.
+const safe = (s) => String(s ?? '').replace(/```/g, "'''").replace(/\r?\n/g, ' ');
+const dedent = (lines) => {
+  const ind = Math.min(...lines.filter((l) => l.trim()).map((l) => l.match(/^\s*/)[0].length));
+  return lines.map((l) => l.slice(Number.isFinite(ind) ? ind : 0));
+};
+function evidence(refs, { traces = true } = {}) {
+  const ok = (refs ?? []).filter((r) => r.resolved?.ok);
+  if (!ok.length) return [];
+  const out = [];
+  const diff = [];
+  const codes = [];
+  for (const r of ok) {
+    const d = r.resolved.data;
+    if (!d) {
+      out.push(`- ${quote(r)}`);
+      continue;
+    }
+    if (d.kind === 'run') {
+      diff.push(`@@ ${d.scenario} · ${d.node} @@`);
+      if (d.side === 'both' && d.differs) diff.push(`- before: ${safe(d.before)}`, `+ after:  ${safe(d.after)}`);
+      else if (d.side === 'both') diff.push(`  same before and after: ${safe(d.after)}`);
+      else if (d.side === 'before') diff.push(`- before: ${safe(d.value)}`);
+      else if (d.side === 'after') diff.push(`+ after:  ${safe(d.value)}`);
+      else diff.push(`  ${safe(d.label)}: ${safe(d.value)}`);
+    } else if (d.kind === 'test') {
+      diff.push(`@@ test ${d.name} @@`, `- before: ${d.before}`, `+ after:  ${d.after}`);
+    } else if (d.kind === 'code') {
+      codes.push(d);
+    }
+  }
+  if (diff.length) out.push('```diff', ...diff, '```');
+  for (const c of codes) {
+    out.push(c.url ? `[${c.where}](${c.url})` : c.where, '```csharp', ...dedent(c.lines).map((l) => l.replace(/```/g, "'''")), '```');
+  }
+  if (traces) {
+    const ids = [...new Set(ok.filter((r) => r.kind === 'run').map((r) => r.scenario))];
+    if (ids.length) out.push(`<sub>Full trace: ${ids.map((id) => `[${code(id)}](#user-content-trace-${id})`).join(' · ')}</sub>`);
+  }
+  return out;
+}
+
 export async function render(a, { analysisDir = '.' } = {}) {
   const out = [];
   const p = (...lines) => out.push(...lines);
   const replayFor = (id) => (a.integrity?.replay ? a.integrity.replay.replace('{id}', id) : null);
+  const found = [...(a.found ?? [])].sort((x, y) => SEVERITY_ORDER.indexOf(x.severity) - SEVERITY_ORDER.indexOf(y.severity));
+  const decisions = a.decisions ?? [];
+  const notChecked = a.notChecked ?? [];
+  const sevCount = (s) => found.filter((f) => f.severity === s).length;
 
   p(MARKER);
   p(`## Review map · \`${a.pr.branch}\``);
   p('');
 
-  // ---- the top: what it found, what it refused to decide, what it did not check ---------------
-  const shorts = (refs) => (refs ?? []).filter((r) => r.resolved?.ok).map((r) => r.resolved.short ?? r.resolved.quote);
-  const found = [...(a.found ?? [])].sort((x, y) => SEVERITY_ORDER.indexOf(x.severity) - SEVERITY_ORDER.indexOf(y.severity));
-  const decisions = a.decisions ?? [];
-  const notChecked = a.notChecked ?? [];
+  // ---- confidence first: everything below is read in its light ---------------------------------
+  if (a.confidence?.length) {
+    p('> [!CAUTION]');
+    p(`> **Reduced confidence:** ${a.confidence.join(' ')}`);
+    p('');
+  }
 
-  p(`### What it found (${found.length})`);
+  // ---- at a glance ------------------------------------------------------------------------------
+  const glance = [
+    ...SEVERITY_ORDER.filter((s) => sevCount(s)).map((s) => `${SEVERITY[s]} ${count(sevCount(s), SEVERITY_WORD[s], SEVERITY_PLURAL[s])}`),
+    `🤔 ${count(decisions.length, 'decision', 'decisions')} for you`,
+    `⬜ ${notChecked.length} not checked`,
+  ];
+  p(`**At a glance:** ${glance.join(' · ')}`);
+  const t = a.tests ?? {};
+  const facts = [];
+  if (a.requirements?.length) facts.push(`${a.requirements.filter((r) => r.verdict === 'met').length}/${a.requirements.length} requirements met`);
+  if (t.newTests?.length) facts.push(`${t.newTests.filter((x) => x.verdict === 'discriminates').length}/${t.newTests.length} new tests fail without the PR`);
+  if (t.coverage?.measured) facts.push(`${t.coverage.reached}/${t.coverage.executable} changed lines ran`);
+  if (a.sensitivity?.ran) facts.push(`a known break shows in ${a.sensitivity.detected}/${a.sensitivity.scenarios} inputs`);
+  if (facts.length) p(`<sub>Computed from the runs: ${facts.join(' · ')}</sub>`);
+  p('');
+
+  // ---- in short -----------------------------------------------------------------------------------
+  if (typeof a.summary === 'string') p(a.summary);
+  else if (a.summary?.length) p(a.summary.map((s) => s.sentence).join(' '));
+  else p('_No summary sentence could be backed by the recorded evidence._');
+  p('');
+
+  // ---- what it found ------------------------------------------------------------------------------
+  p(`### 🔍 What it found`);
   p('');
   if (!found.length) p('_Nothing the evidence backs._');
   found.forEach((f, i) => {
-    const ev = shorts(f.refs);
-    const tag = f.computed ? ' <sub>🤖 computed by the script</sub>' : ev.length ? ` <sub>${ev.join(' · ')}</sub>` : '';
-    p(`${i + 1}. ${SEVERITY[f.severity]} ${f.statement}${tag}`);
+    p(`**${i + 1}. ${SEVERITY[f.severity]} ${f.statement}**${f.computed ? ' <sub>🤖 computed by the script</sub>' : ''}`);
+    p('');
+    const ev = evidence(f.refs);
+    if (ev.length) p(...ev, '');
   });
-  p('');
-  const withQuotes = found.map((f, i) => ({ i, qs: quotes(f.refs) })).filter((x) => x.qs.length);
-  if (withQuotes.length) {
-    p('<details>');
-    p('<summary>What the runs show for each finding, copied by a script</summary>');
-    p('');
-    for (const { i, qs } of withQuotes) {
-      p(`${i + 1}. ${found[i].statement}`);
-      for (const q of qs) p(`   - ${q}`);
-    }
-    p('');
-    p('</details>');
-    p('');
-  }
 
-  p(`### What it refused to decide (${decisions.length})`);
+  // ---- decisions ----------------------------------------------------------------------------------
+  p(`### 🤔 Decisions for you`);
   p('');
-  if (!decisions.length) p('_Nothing: every question in this review is answered by the evidence._');
+  if (!decisions.length) p('_None: every question in this review is settled by the evidence._');
   decisions.forEach((d, i) => {
-    p(`${i + 1}. **${d.question}** ${REASON[d.reason] ?? code(d.reason)}${d.computed ? ' <sub>🤖 opened by rule</sub>' : ''}`);
-    p(`   - **Why:** ${d.detail}`);
-    const qs = quotes(d.refs);
-    if (qs.length) p(`     <br><sub>${qs.join(' · ')}</sub>`);
-    p(`   - **Would settle it:** ${d.wouldSettleIt}`);
-    if (d.options?.length) p(`   - **Options:** ${d.options.map((o, k) => `(${String.fromCharCode(97 + k)}) ${o}`).join(' · ')}`);
-    p(`   - **Owner:** ${ownerText(d.owner)}`);
-  });
-  if (decisions.length) {
+    p(`**${i + 1}. ${d.question}** · ${REASON[d.reason] ?? code(d.reason)} · owner: ${ownerText(d.owner)}${d.computed ? ' · <sub>🤖 opened by rule</sub>' : ''}`);
     p('');
-    p('<sub>Reasons are from a fixed list. `intent`: the requirement does not say. `trade-off`: a policy call with no technically right answer. `unreproduced`: the reported symptom never appeared on the code before the change. `out-of-reach`: the tools here cannot exercise it.</sub>');
-  }
-  p('');
+    p(`> **Why the AI didn't decide:** ${d.detail}`);
+    p(`> **What would settle it:** ${d.wouldSettleIt}`);
+    if (d.options?.length) p(`> **Options:** ${d.options.map((o, k) => `(${String.fromCharCode(97 + k)}) ${o}`).join(' · ')}`);
+    p('');
+    const ev = evidence(d.refs);
+    if (ev.length) p('<details>', '<summary>Evidence</summary>', '', ...ev, '', '</details>', '');
+  });
+  if (decisions.length) p(`<sub>Reasons come from a fixed list: ${Object.entries(REASON_MEANING).map(([k, v]) => `\`${k}\` ${v}`).join(' · ')}.</sub>`, '');
 
-  p(`### What it did not check (${notChecked.length})`);
+  // ---- not checked --------------------------------------------------------------------------------
+  p(`### ⬜ What it did not check`);
   p('');
   if (!notChecked.length) p('_Nothing listed._');
-  notChecked.forEach((n, i) => {
-    p(`${i + 1}. **${n.item}**: ${n.reason}.${n.computed ? ' <sub>🤖 computed by the script</sub>' : ''}`);
-    p(`   - **Risk if wrong:** ${n.riskIfWrong}. **How to check:** ${n.howToCheck}.`);
-  });
+  else {
+    p('| What | Why not | Risk if wrong | How to check |');
+    p('|---|---|---|---|');
+    for (const n of notChecked) p(`| ${cell(n.item)}${n.computed ? ' <sub>🤖</sub>' : ''} | ${cell(n.reason)} | ${cell(n.riskIfWrong)} | ${cell(n.howToCheck)} |`);
+    p('', '<sub>🤖 added by the script from coverage, the requirement map and the extra builds.</sub>');
+  }
   p('');
 
-  // ---- confidence: computed by the script ---------------------------------------------------
-  if (a.confidence?.length) {
-    p('> [!CAUTION]');
-    p('> **Reduced confidence in this run.** Read the lists above with these in mind:');
-    for (const c of a.confidence) p(`> - ${c}`);
+  // ---- items the gate removed (visible: they say how much of the reviewer's text failed) -----------
+  if (a.unverified?.length) {
+    p(`### ❌ Not backed by the evidence (${a.unverified.length})`);
+    p('');
+    p('The reviewer wrote these, but what it pointed to does not exist or shows something else. Treat them as unchecked opinions.');
+    p('');
+    for (const u of a.unverified) p(`- **${u.section}:** ${u.text.replace(/\n+/g, ' ')}<br><sub>${u.reasons.join('; ')}${u.quotes?.length ? `. The runs show: ${u.quotes.join('; ')}` : ''}</sub>`);
     p('');
   }
 
-  // ---- summary ------------------------------------------------------------------------------
-  p('### In short');
-  p('');
-  if (typeof a.summary === 'string') p(a.summary);
-  else if (a.summary?.length) {
-    p(a.summary.map((s) => s.sentence).join(' '));
-    p('');
-    p('<details>');
-    p('<summary>Evidence behind these sentences, copied from the runs by a script</summary>');
-    p('');
-    for (const s of a.summary) {
-      p(`- ${s.sentence}`);
-      for (const q of quotes(s.refs)) p(`  - ${q}`);
-    }
-    p('');
-    p('</details>');
-  } else p('_No summary sentence could be backed by the recorded evidence; see "Not backed by the evidence" below._');
-  p('');
-
-  const changed = a.nodes.filter((n) => n.status === 'changed').length;
-  const affected = a.nodes.filter((n) => n.status === 'affected').length;
-  const verdicts = a.claims.reduce((m, c) => ((m[c.verdict] = (m[c.verdict] ?? 0) + 1), m), {});
-  const open = (verdicts['not-verified'] ?? 0) + (verdicts.contradicted ?? 0) + (verdicts.partly ?? 0);
-  p(
-    [
-      `**${count(changed, 'unit', 'units')} changed**`,
-      `**${count(affected, 'unit', 'units')} behave differently downstream**`,
-      `**${a.claims.length} author claims checked:** ${verdicts.verified ?? 0} hold${verdicts['code-only'] ? `, ${verdicts['code-only']} hold in the code only` : ''}, ${open} need you`,
-      a.unverified ? `**${count(a.unverified.length, 'reviewer statement', 'reviewer statements')} not backed by the evidence**` : null,
-    ]
-      .filter(Boolean)
-      .join(' · '),
-  );
-  p('');
-
-  // ---- the issue, requirement by requirement ---------------------------------------------------
+  // ---- requirements -------------------------------------------------------------------------------
   if (a.requirements?.length) {
-    p(`### The ${a.pr.issueRef ? `issue (${code(a.pr.issueRef)})` : 'request'}, requirement by requirement`);
+    p(`### 📋 Requirements${a.pr.issueRef ? ` · issue ${code(a.pr.issueRef)}` : ''}`);
     p('');
     const r = a.reproduction;
     if (r && r.status !== 'no-symptom') {
       const predicted = r.symptom?.contains?.length ? `${r.symptom.contains.map(code).join(' or ')} at ${r.node ?? code(r.symptom.handoff)}` : 'nothing';
-      const afterText = (x) => (!x.seen ? '' : x.seenAfter === false ? `, gone after (${code(x.afterValue)})` : x.seenAfter ? `, **still there after** (${code(x.afterValue)})` : ', not run after');
-      const seen = (r.rows ?? []).map((x) => `${code(x.id)}: ${!x.ran ? 'did not run' : x.seen ? `**seen** before (${code(x.value)})${afterText(x)}` : `not seen (${code(x.value)})`}`).join('; ');
-      p(`**Reproducing the reported bug.** ${a.plannedBeforeRuns ? 'Before anything ran, the plan predicted' : 'The reviewer stated'} the bug would show as ${predicted} on the code before the PR. ${seen ? `Recorded: ${seen}.` : 'No scenario reproduces the issue.'} ${REPRO[r.status] ?? ''}`);
+      const row = (r.rows ?? []).find((x) => x.seen) ?? (r.rows ?? [])[0];
+      const seen = !row ? 'no input reproduces the issue' : !row.ran ? `${code(row.id)} did not run` : row.seen ? `seen before the PR (${code(row.value)})${row.seenAfter === false ? `, gone after (${code(row.afterValue)})` : row.seenAfter ? ', **still there after**' : ''}` : `not seen before the PR (${code(row.value)})`;
+      const ok = r.status === 'reproduced' && (r.rows ?? []).some((x) => x.seen && x.seenAfter === false);
+      p(`🐞 **The reported bug:** ${a.plannedBeforeRuns ? 'predicted before the runs' : 'stated by the reviewer'} as ${predicted}; ${seen}. ${ok ? '✅ A "fixed" verdict is allowed.' : '❌ The script will not let the review say the PR fixes it.'}`);
       p('');
     }
-    p('| | Requirement | Covered by (hand-offs that differ before → after) | Verdict |');
+    p('| | Requirement | Verdict | Shown by |');
     p('|---|---|---|---|');
     for (const q of a.requirements) {
       const cov = q.covers.length
-        ? q.covers.map((c) => `[${code(c.id)}](#user-content-trace-${c.id}): ${!c.ran ? 'did not run' : c.differs.length ? c.differs.join(' ') : 'no difference'}`).join('<br>')
-        : '_no scenario_';
-      const ev = shorts(q.refs);
-      const verdict = `${REQ_VERDICT[q.verdict]}<br><sub>${cell(q.note)}${ev.length ? `<br>${ev.join(' · ')}` : ''}${q.rule ? `<br>by rule: ${q.rule}` : ''}</sub>`;
-      p(`| ${q.id}${q.primary ? ' ★' : ''} | ${cell(q.statement)} | ${cov} | ${verdict} |`);
+        ? q.covers.map((c) => `[${code(c.id)}](#user-content-trace-${c.id}) ${!c.ran ? 'did not run' : c.differs.length ? [...new Set(c.differs)].join('') : 'no change'}`).join('<br>')
+        : '_no input_';
+      p(`| ${q.id}${q.primary ? ' ★' : ''} | ${cell(q.statement)} | ${REQ_VERDICT[q.verdict]}<br><sub>${cell(q.note)}${q.rule ? `<br>by rule: ${q.rule}` : ''}</sub> | ${cov} |`);
     }
     p('');
-    p(`<sub>★ the requirement that says the reported bug is gone. ${a.plannedBeforeRuns ? 'Requirements and the expected symptom were written in the plan step, before anything ran.' : 'Requirements and the expected symptom were written by hand after the runs, so they are not a prediction.'}</sub>`);
+    p(`<sub>★ says the reported bug is gone. ①②③④ are the hand-offs that change. ${a.plannedBeforeRuns ? 'Requirements and the expected bug were written before anything ran.' : 'Requirements were written by hand after the runs, so they are not a prediction.'}</sub>`);
     p('');
   }
 
-  // ---- which part of the change causes what (per-hunk builds) ---------------------------------------
+  // ---- which part causes what, with the code itself -------------------------------------------------
   if (a.effects?.ran && a.effects.groups.length) {
     const blob = a.pr.blob;
     const hunkLink = (h) => (h.whole || !blob ? code(h.label) : `[${h.label}](${blob}/${h.file}#L${h.newStart}${h.newCount > 1 ? `-L${h.newStart + h.newCount - 1}` : ''})`);
-    const at = (list) => {
+    const chips = (list) => {
       const by = new Map();
       for (const x of list) by.set(x.scenario, [...(by.get(x.scenario) ?? []), x.node.split(' ')[0]]);
-      return [...by].map(([s, ns]) => `[${code(s)}](#user-content-trace-${s}) ${[...new Set(ns)].join(' ')}`).join('<br>');
+      return [...by].map(([s, ns]) => `[${code(s)}](#user-content-trace-${s}) ${[...new Set(ns)].join('')}`).join(' · ');
     };
-    p('### Which part of the change causes what');
+    p('### 🧩 Which part of the change causes what');
     p('');
-    p(`The script built the PR again with one part removed at a time and ran every input through it (${count(a.effects.runs, 'extra build', 'extra builds')}). Where the PR changes a hand-off, **needed** means removing the part brings the old value back, so this part causes it. A part other changed lines depend on cannot be removed alone; the compiler names the lines that need it, and those parts are removed with it.`);
+    p(`<sub>The script rebuilt the PR with one part removed at a time and ran every input through it (${count(a.effects.runs, 'build', 'builds')}). A part **causes** an effect when removing it brings the old value back.</sub>`);
     p('');
-    p('| Part of the change (removed) | Build | Needed for | Partly needed for | Not needed for |');
-    p('|---|---|---|---|---|');
     for (const g of a.effects.groups) {
-      const parts = g.hunks.map(hunkLink).join(' +<br>');
-      if (g.build !== 'ok') {
-        const err = g.errors?.[0] ? `<br><sub>${cell(`${g.errors[0].code}: ${g.errors[0].message}`.slice(0, 100))}</sub>` : '';
-        p(`| ${parts} | did not build${err} | | | |`);
-        continue;
+      const parts = g.hunks.map(hunkLink).join(' + ');
+      let what;
+      if (g.build !== 'ok') what = `did not build without it${g.errors?.[0] ? ` (${code(`${g.errors[0].code}: ${g.errors[0].message}`.slice(0, 90))})` : ''}`;
+      else if (!g.needed.length && !g.partly.length && !g.sideEffects.length) what = '**no effect in any input** (nothing here shows what it changes)';
+      else what = `**causes** ${chips(g.needed) || '–'}${g.partly.length ? ` · partly ${chips(g.partly)}` : ''}${g.sideEffects.length ? ` · removing it also changes ${chips(g.sideEffects)}` : ''}`;
+      p(`- ${parts}${g.hunks.length > 1 ? ' <sub>(grouped: the compiler needs them together)</sub>' : ''} → ${what}`);
+      const diff = [];
+      let partial = false;
+      for (const h of g.hunks) {
+        if (h.whole) continue;
+        const body = dedent([...(h.removed ?? []), ...(h.added ?? [])]);
+        const nr = (h.removed ?? []).length;
+        diff.push(`@@ ${h.label} @@`, ...body.map((l, k) => `${k < nr ? '-' : '+'} ${l}`.trimEnd()));
+        if (!h.removed || h.moreLines) partial = true;
       }
-      const none = !g.needed.length && !g.partly.length && !g.sideEffects.length;
-      const side = g.sideEffects.length ? `<br><sub>removing it also changes: ${at(g.sideEffects)}</sub>` : '';
-      p(`| ${parts} | ok | ${g.needed.length ? at(g.needed) : none ? '**nothing: no input shows what it does**' : '–'}${side} | ${at(g.partly) || '–'} | ${at(g.notNeeded) || '–'} |`);
+      const block = ['```diff', ...diff.map((l) => l.replace(/```/g, "'''")), '```'];
+      if (diff.length <= 9) p('', ...block.map((l) => `  ${l}`), '');
+      else p('', '  <details>', `  <summary>Show the code (${diff.length - g.hunks.length} lines${partial ? ', shortened' : ''})</summary>`, '', ...block.map((l) => `  ${l}`), '', '  </details>', '');
     }
-    p('');
-    p('<sub>① model · ② diagnostics · ③ C# files · ④ run time. Each cell links to that input\'s trace. Computed by the script from the extra builds; the reviewing agent cannot word this table.</sub>');
     p('');
   }
 
-  // ---- pipeline map -----------------------------------------------------------------------
-  p('### The change as a pipeline');
+  // ---- pipeline map -------------------------------------------------------------------------------
+  p('### 🗺️ The change as a pipeline');
   p('');
   p('```mermaid');
   p('flowchart LR');
@@ -236,7 +271,7 @@ export async function render(a, { analysisDir = '.' } = {}) {
   p('  classDef same fill:#F1EFE8,stroke:#888780,color:#2C2C2A');
   p('```');
   p('');
-  p('🟧 changed by this PR · 🟩 code untouched, behaviour changes · ⬜ unchanged · dashed arrow = the data on that hand-off is different after this PR');
+  p('<sub>🟧 changed by this PR · 🟩 code untouched, behaviour changes · ⬜ unchanged · dashed arrow: the data on that hand-off changes</sub>');
   p('');
 
   // ---- traces: one real input followed through every hand-off -----------------------------
@@ -252,9 +287,9 @@ export async function render(a, { analysisDir = '.' } = {}) {
     const { handoffs } = await import(adapterUrl.href);
     const HANDOFFS = handoffs({ code });
 
-    p('### Follow one real input through the pipeline');
+    p('### 🔬 Follow one real input through the pipeline');
     p('');
-    p('Each case below is a real input, run on the code before and after this PR. Its diagram follows the input through the pipeline: every box shows what crossed that hand-off before and after the change. 🟧 marks where a difference starts (nothing upstream of it differs), 🟦 marks what follows from it, dashed arrows lead into boxes that differ. The values are copied from the runs and the tags are computed by a script; the full values are in the table under each diagram.');
+    p('<sub>Each input ran on the code before and after this PR. Each box shows what crossed that hand-off; 🟧 is where a difference starts, 🟦 what follows from it. Values are copied from the runs by a script.</sub>');
     p('');
     a.traces.cases.forEach((c, i) => {
       const b = before.find((s) => s.id === c.id);
@@ -338,128 +373,96 @@ export async function render(a, { analysisDir = '.' } = {}) {
     });
   }
 
-  // ---- tests ------------------------------------------------------------------------------
+  // ---- more detail, folded ------------------------------------------------------------------------
+  p('### More detail');
+  p('');
   if (a.tests) {
     const t = a.tests;
-    p('### Tests, before and after');
+    const side = (s) => (s?.built ? `${s.passed}/${s.total} pass` : 'did not build');
+    const disc = (t.newTests ?? []).filter((x) => x.verdict === 'discriminates').length;
+    p('<details>');
+    p(`<summary><b>🧪 Tests</b>: ${side(t.before)} before, ${side(t.after)} after${t.newTests?.length ? ` · ${disc} of ${t.newTests.length} new tests fail without the PR` : ''}${t.coverage?.measured ? ` · ${t.coverage.reached}/${t.coverage.executable} changed lines ran` : ''}</summary>`);
     p('');
-    const side = (s) => (s?.built ? `${s.passed} passed, ${s.failed} failed${s.skipped ? `, ${s.skipped} skipped` : ''}` : `did not build${s?.reason ? ` (${s.reason})` : ''}`);
-    p(`| | Before this PR | After this PR |`);
-    p('|---|---|---|');
-    p(`| ${code(t.project)} | ${side(t.before)}${t.before?.mode ? `<br><sub>${t.before.mode}</sub>` : ''} | ${side(t.after)} |`);
+    p(`${code(t.project)}. Before: ${t.before?.mode ?? 'the PR\'s source reverted'}.`);
     p('');
-    if (t.changes?.length) {
-      p('<details>');
-      p(`<summary>${count(t.changes.length, 'test changed outcome', 'tests changed outcome')}</summary>`);
+    if (t.newTests?.length) {
+      const V = {
+        discriminates: '✅ fails before, passes after',
+        'passes-both': '⚠️ passes before too: does not test this change',
+        'fails-after': '❌ fails on this PR',
+        'not-run-before': '❔ could not run before (tests reverted)',
+        'missing-before': '❔ did not run before',
+      };
+      p('| New test | Before | After | What it shows |');
+      p('|---|---|---|---|');
+      for (const x of t.newTests.slice(0, 60)) p(`| ${code(x.name.split('.').slice(-2).join('.'))} | ${x.before ?? '–'} | ${x.after} | ${V[x.verdict]} |`);
+      p('');
+    }
+    const other = (t.changes ?? []).filter((c) => !(t.newTests ?? []).some((x) => x.name === c.name));
+    if (other.length) {
+      p('Other tests that changed outcome:');
       p('');
       p('| Test | Before | After |');
       p('|---|---|---|');
-      for (const ch of t.changes.slice(0, 60)) p(`| ${code(ch.name)} | ${ch.before ?? 'did not exist'} | ${ch.after ?? 'did not exist'} |`);
-      if (t.changes.length > 60) p(`| … ${t.changes.length - 60} more | | |`);
-      p('');
-      p('</details>');
+      for (const ch of other.slice(0, 40)) p(`| ${code(ch.name)} | ${ch.before ?? 'did not exist'} | ${ch.after ?? 'did not exist'} |`);
       p('');
     }
-    if (t.newTests?.length) {
-      const VERDICT_T = {
-        discriminates: '✅ fails before, passes after: shows the change works',
-        'passes-both': '⚠️ passes on the old code too: does not show the change works',
-        'fails-after': '❌ fails on this PR',
-        'not-run-before': '❔ could not run on the old code (the tests were reverted)',
-        'missing-before': '❔ did not run on the old code',
-      };
-      const weak = t.newTests.filter((x) => x.verdict !== 'discriminates').length;
-      p(`<details${weak ? ' open' : ''}>`);
-      p(`<summary>${count(t.newTests.length, 'new test', 'new tests')} in this PR, run against the old code: ${t.newTests.length - weak} show the change works</summary>`);
-      p('');
-      p('| New test | Before | After | What it shows |');
-      p('|---|---|---|---|');
-      for (const x of t.newTests.slice(0, 60)) p(`| ${code(x.name.split('.').slice(-2).join('.'))} | ${x.before ?? 'did not exist'} | ${x.after} | ${VERDICT_T[x.verdict]} |`);
-      p('');
-      p('</details>');
-      p('');
-    }
-    if (t.coverage?.measured) {
-      const c = t.coverage;
-      p(`**Changed lines that ran:** ${c.reached} of ${c.executable} executable changed lines were reached (${c.byProbe} by a scenario, ${c.byTests} by a test)${c.removedLines ? `; ${c.removedLines} removed lines are checked only by the before side` : ''}. Measured with code coverage on the after side.`);
-      p('');
-    }
+    if (t.coverage?.measured) p(`Changed lines that ran: ${t.coverage.reached} of ${t.coverage.executable} (${t.coverage.byProbe} by an input, ${t.coverage.byTests} by a test)${t.coverage.removedLines ? `; ${t.coverage.removedLines} removed lines are checked by the before side only` : ''}.`, '');
+    p('</details>');
+    p('');
   }
 
-  // ---- unit cards -------------------------------------------------------------------------
-  p('### Units, input to output');
-  p('');
-  a.units.forEach((u, i) => {
-    p(`<details${i === 0 ? ' open' : ''}>`);
-    p(`<summary><b>${u.name}</b> — ${STATUS[u.status]}</summary>`);
+  if (a.units?.length) {
+    p('<details>');
+    p(`<summary><b>🔧 Units, input to output</b> (${a.units.length})</summary>`);
     p('');
-    p('| | |');
-    p('|---|---|');
-    if (u.where) p(`| Where | ${cell(u.where)} |`);
-    p(`| Receives | ${cell(u.receives)} |`);
-    p(`| Emits | ${cell(u.emits)} |`);
-    p(`| What changed | ${cell(u.change)} |`);
-    p('');
-    if (u.examples?.length) {
-      if (u.examples[0].refs) {
-        p('| What it shows | Evidence, copied from the runs by the script |');
-        p('|---|---|');
-        for (const x of u.examples) p(`| ${cell(x.note)} | ${cell(quotes(x.refs).join('\n'))} |`);
-      } else {
-        p('| Input | Before | After | Evidence |');
-        p('|---|---|---|---|');
-        for (const x of u.examples) p(`| ${cell(x.input)} | ${cell(x.before)} | ${cell(x.after)} | ${EVIDENCE[x.evidence]}${x.ref ? `<br>${cell(x.ref)}` : ''} |`);
-      }
+    for (const u of a.units) {
+      p(`**${u.name}** · ${STATUS[u.status]}${u.where ? ` · ${u.where}` : ''}`);
       p('');
+      p(`- **Receives:** ${u.receives}`);
+      p(`- **Emits:** ${u.emits}`);
+      p(`- **What changed:** ${u.change}`);
+      p('');
+      for (const x of u.examples ?? []) {
+        if (x.refs) {
+          p(`_${x.note}_`);
+          p('');
+          const ev = evidence(x.refs, { traces: false });
+          if (ev.length) p(...ev, '');
+        } else p(`- ${x.input}: ${x.before} → ${x.after} (${EVIDENCE[x.evidence]})`);
+      }
     }
     p('</details>');
     p('');
-  });
-
-  // ---- claims -----------------------------------------------------------------------------
-  p("### The author's claims, checked");
-  p('');
-  p('| Claim | Made in | Verdict | Why |');
-  p('|---|---|---|---|');
-  for (const c of a.claims) {
-    const qs = quotes(c.refs);
-    p(`| ${cell(c.claim)} | ${cell(c.source)} | ${VERDICT[c.verdict]} | ${cell(c.evidence)}${qs.length ? `<br><sub>${cell(qs.join('\n'))}</sub>` : ''} |`);
   }
-  p('');
 
-  // ---- items the gate removed ---------------------------------------------------------------
-  if (a.unverified?.length) {
-    p('### Not backed by the evidence');
+  if (a.claims?.length) {
+    const v = a.claims.reduce((m, c) => ((m[c.verdict] = (m[c.verdict] ?? 0) + 1), m), {});
+    const open = (v['not-verified'] ?? 0) + (v.contradicted ?? 0) + (v.partly ?? 0);
+    p('<details>');
+    p(`<summary><b>📝 The author's claims, checked</b>: ${v.verified ?? 0} hold, ${open} need you${v['code-only'] ? `, ${v['code-only']} hold in the code only` : ''}</summary>`);
     p('');
-    p("The reviewing agent wrote these, but the evidence it pointed to does not exist or does not show what it said, so they were moved out of the sections above. Treat them as unchecked opinions.");
-    p('');
-    for (const u of a.unverified) {
-      p(`- **${u.section}:** ${u.text.replace(/\n+/g, ' ')}`);
-      p(`  <br><sub>Why it was moved: ${u.reasons.join('; ')}${u.quotes?.length ? `. What the runs actually show: ${u.quotes.join('; ')}` : ''}</sub>`);
+    for (const c of a.claims) {
+      p(`**${VERDICT[c.verdict]}:** ${c.claim} <sub>(${c.source})</sub>`);
+      p('');
+      p(`${c.evidence}`);
+      p('');
+      const ev = evidence(c.refs, { traces: false });
+      if (ev.length) p(...ev, '');
     }
+    p('</details>');
     p('');
   }
 
-  // ---- method -----------------------------------------------------------------------------
   p('<details>');
-  p('<summary>How this was checked</summary>');
+  p('<summary><b>⚙️ How this was checked</b></summary>');
   p('');
-  p('**Run for real**');
   for (const m of a.method.observed) p(`- ${m}`);
   const s = a.sensitivity;
   if (s?.ran) {
     const blind = (s.rows ?? []).filter((r) => !r.handoffs.length).map((r) => code(r.id));
-    p(
-      `- Can the probe see a break? With a known break applied to the after code (${s.description}), the probe showed a difference in ${s.detected} of ${s.scenarios} scenarios${s.where?.length ? `, at ${s.where.join(', ')}` : ''}. ` +
-        (!s.detected
-          ? 'So "no difference" in this review is weak evidence.'
-          : blind.length
-            ? `It did not show in ${blind.join(', ')}, so for those inputs "no difference" says less.`
-            : 'So a "no difference" in any scenario here would have shown a break of this kind.'),
-    );
+    p(`- Can the probe see a break? A known break (${s.description}) showed in ${s.detected} of ${s.scenarios} inputs${s.where?.length ? `, at ${s.where.join(', ')}` : ''}.${!s.detected ? ' So "no difference" here is weak evidence.' : blind.length ? ` It did not show in ${blind.join(', ')}, so for those inputs "no difference" says less.` : ''}`);
   }
-  p('');
-  p('What was not covered is listed at the top, under "What it did not check".');
   if (a.method.downgraded?.length) {
     p('');
     p('**Reviewer verdicts the script downgraded**');
