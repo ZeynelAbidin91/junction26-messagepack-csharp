@@ -41,7 +41,9 @@ jobs:
         id: pr
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh api "repos/${{ github.repository }}/pulls/$PR" --jq '"head=\(.head.sha)\nbase=\(.base.sha)"' >> "$GITHUB_OUTPUT"
+        # base is the base branch (its current tip), not the PR's recorded base commit, which GitHub
+        # can leave stale; the reviewer is taken from there.
+        run: gh api "repos/${{ github.repository }}/pulls/$PR" --jq '"head=\(.head.sha)\nbase=\(.base.ref)"' >> "$GITHUB_OUTPUT"
       - name: Check out the code under review (not executed in this job)
         uses: actions/checkout@v4
         with:
