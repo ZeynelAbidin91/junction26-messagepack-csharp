@@ -94,7 +94,7 @@ export function computedFound({ tests }) {
  * before anything ran; here it is looked up in the recording of each scenario marked as the issue's
  * reproduction.
  */
-export function reproduction({ plan, before, handoffs }) {
+export function reproduction({ plan, before, after = [], handoffs }) {
   const symptom = plan.symptom ?? { contains: [] };
   const repros = (plan.scenarios ?? []).filter((s) => s.reproducesIssue);
   if (!symptom.contains?.length) return { status: 'no-symptom', symptom, rows: [] };
@@ -104,9 +104,15 @@ export function reproduction({ plan, before, handoffs }) {
   const rows = repros.map((s) => {
     const b = before.find((x) => x.id === s.id);
     if (!b || b.probeError) return { id: s.id, ran: false, seen: false };
-    const text = `${h.brief(b)}\n${h.cell(b).show}`.toLowerCase();
-    const hit = symptom.contains.find((c) => text.includes(c.toLowerCase()));
-    return { id: s.id, ran: true, seen: Boolean(hit), match: hit ?? null, value: h.brief(b) };
+    const has = (x) => {
+      const text = `${h.brief(x)}\n${h.cell(x).show}`.toLowerCase();
+      return symptom.contains.find((c) => text.includes(c.toLowerCase())) ?? null;
+    };
+    const hit = has(b);
+    // "Fixed" also needs the symptom gone on the after side.
+    const f = after.find((x) => x.id === s.id);
+    const afterRan = Boolean(f && !f.probeError);
+    return { id: s.id, ran: true, seen: Boolean(hit), match: hit, value: h.brief(b), afterRan, seenAfter: afterRan ? Boolean(has(f)) : null, afterValue: afterRan ? h.brief(f) : null };
   });
   const status = rows.some((r) => r.seen) ? 'reproduced' : rows.some((r) => r.ran) ? 'unreproduced' : 'not-run';
   return { status, symptom, node: h.node, rows };
@@ -165,6 +171,8 @@ export function requirementTable({ plan, verdicts, before, after, handoffs, repr
       rule = covers.length ? 'the scenarios that cover it did not run' : 'no scenario covers it';
     } else if (r.primary && verdict === 'met' && repro && !['reproduced', 'no-symptom'].includes(repro.status)) {
       rule = 'the reported bug was never reproduced on the code before the PR';
+    } else if (r.primary && verdict === 'met' && repro?.status === 'reproduced' && !repro.rows.some((x) => x.seen && x.seenAfter === false)) {
+      rule = 'the reported symptom is still there after the PR';
     }
     if (rule && verdict !== 'not-shown') {
       downgraded.push(`${r.id} "${r.statement}": marked ${verdict}, but ${rule}, so it is shown as not shown`);

@@ -6,7 +6,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { handoffs } from '../adapters/messagepack/handoffs.mjs';
-import { ownerResolver, reproduction, sdkSatisfies } from '../lib/checks.mjs';
+import { ownerResolver, reproduction, requirementTable, sdkSatisfies } from '../lib/checks.mjs';
 import { finishAnalysis, normalizeFixedLists } from '../lib/finish.mjs';
 import { Analysis } from '../lib/schemas.mjs';
 import { verifyAnalysis } from '../lib/verify.mjs';
@@ -67,7 +67,15 @@ test('the issue is only "fixed" when its symptom was seen on the before side', {
   const planWith = (contains) => ({ requirements, scenarios, symptom: { handoff: 'model', contains, why: 'test' } });
 
   // The recorded before side of the repro throws ArgumentException, so this prediction is confirmed ...
-  assert.equal(reproduction({ plan: planWith(['ArgumentException']), before, handoffs: H }).status, 'reproduced');
+  const seen = reproduction({ plan: planWith(['ArgumentException']), before, after, handoffs: H });
+  assert.equal(seen.status, 'reproduced');
+  assert.equal(seen.rows[0].seenAfter, false, 'and gone after the PR');
+  // A symptom still present after the PR does not allow "met" for the primary requirement.
+  const still = reproduction({ plan: { ...planWith(['MsgPack005']), symptom: { handoff: 'diagnostics', contains: ['MsgPack005'], why: 'test' } }, before, after, handoffs: H });
+  assert.equal(still.rows[0].seenAfter, true);
+  const stillTable = requirementTable({ plan: planWith(['MsgPack005']), verdicts: [{ id: 'R1', verdict: 'met', note: '', refs: [] }], before, after, handoffs: H, repro: still });
+  assert.match(stillTable.rows[0].rule, /still there after/);
+  assert.equal(stillTable.rows[0].verdict, 'not-shown');
   // ... and a prediction of a different symptom is not.
   const plan = planWith(['IndexOutOfRangeException']);
   assert.equal(reproduction({ plan, before, handoffs: H }).status, 'unreproduced');

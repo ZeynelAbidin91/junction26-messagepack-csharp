@@ -56,7 +56,7 @@ export function normalizeFixedLists(v) {
  */
 export function finishAnalysis(a, { plan, issueRef, pr, tests, before, after, mutant, extraSides, handoffs, readCode, blob, ownersSetting, otherTestProjects }) {
   const v = structuredClone(a);
-  const repro = reproduction({ plan, before, handoffs });
+  const repro = reproduction({ plan, before, after, handoffs });
 
   // Rule-made items go in before the gate, marked computed, so the agent can neither word nor drop them.
   v.found = [...computedFound({ tests }), ...(v.found ?? [])];

@@ -199,7 +199,7 @@ ${JSON.stringify((plan.requirements ?? []).map((r) => ({ ...r, coveredBy: plan.s
 </requirements>
 
 <script_findings note="Computed by a script from the runs and shown in the comment as they are.">
-${JSON.stringify({ issueReproduction: reproduction({ plan, before, handoffs: HANDOFFS }), newTests: testSummary.newTests, changedLineCoverage: testSummary.coverage }, null, 1)}
+${JSON.stringify({ issueReproduction: reproduction({ plan, before, after, handoffs: HANDOFFS }), newTests: testSummary.newTests, changedLineCoverage: testSummary.coverage }, null, 1)}
 </script_findings>
 
 Write the review map.`;

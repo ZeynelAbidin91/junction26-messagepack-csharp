@@ -37,7 +37,7 @@ const SEVERITY_ORDER = ['CAUTION', 'WARNING', 'IMPORTANT', 'NOTE'];
 const REASON = { intent: '`intent`', 'trade-off': '`trade-off`', unreproduced: '`unreproduced`', 'out-of-reach': '`out-of-reach`' };
 const REQ_VERDICT = { met: '✅ met', partly: '🟡 partly', 'not-met': '❌ not met', 'not-shown': '⚠️ not shown' };
 const REPRO = {
-  reproduced: 'So the bug was reproduced, and a "fixed" verdict is allowed.',
+  reproduced: 'So the bug was reproduced. A "fixed" verdict also needs the symptom gone after the PR.',
   unreproduced: 'So the bug was **not** reproduced, and the script will not let the review say the PR fixes it.',
   'no-repro': 'So the script will not let the review say the PR fixes it.',
   'not-run': 'So the script will not let the review say the PR fixes it.',
@@ -173,7 +173,8 @@ export async function render(a, { analysisDir = '.' } = {}) {
     const r = a.reproduction;
     if (r && r.status !== 'no-symptom') {
       const predicted = r.symptom?.contains?.length ? `${r.symptom.contains.map(code).join(' or ')} at ${r.node ?? code(r.symptom.handoff)}` : 'nothing';
-      const seen = (r.rows ?? []).map((x) => `${code(x.id)}: ${!x.ran ? 'did not run' : x.seen ? `**seen** (${code(x.value)})` : `not seen (${code(x.value)})`}`).join('; ');
+      const afterText = (x) => (!x.seen ? '' : x.seenAfter === false ? `, gone after (${code(x.afterValue)})` : x.seenAfter ? `, **still there after** (${code(x.afterValue)})` : ', not run after');
+      const seen = (r.rows ?? []).map((x) => `${code(x.id)}: ${!x.ran ? 'did not run' : x.seen ? `**seen** before (${code(x.value)})${afterText(x)}` : `not seen (${code(x.value)})`}`).join('; ');
       p(`**Reproducing the reported bug.** ${a.plannedBeforeRuns ? 'Before anything ran, the plan predicted' : 'The reviewer stated'} the bug would show as ${predicted} on the code before the PR. ${seen ? `Recorded: ${seen}.` : 'No scenario reproduces the issue.'} ${REPRO[r.status] ?? ''}`);
       p('');
     }
