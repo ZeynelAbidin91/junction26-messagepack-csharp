@@ -25,6 +25,9 @@ permissions:
 
 env:
   PR: ${{ github.event.pull_request.number || inputs.pr }}
+  # Model for the reviewing agent. Override without editing this file by setting a repository
+  # variable REVIEW_MAP_MODEL (for example claude-opus-5-5 for a stronger, pricier review).
+  REVIEW_MAP_MODEL: ${{ vars.REVIEW_MAP_MODEL || 'claude-sonnet-5-5' }}
 
 jobs:
   plan:
