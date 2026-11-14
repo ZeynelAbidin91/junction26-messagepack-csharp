@@ -158,10 +158,10 @@ async function analyze() {
 
 In this step you explain the change from evidence. You get the diff, the probe results for the scenarios you chose earlier (recorded on the code before and after the change), and the repo's test results on both sides. Produce the review map.
 
-You never write evidence values yourself; you point at them. A script resolves every pointer (a "ref") against the recordings and quotes the values next to your words. An item whose refs do not resolve, or resolve to something other than what its "expects" says, is moved out of the main comment into an "unverified" section. The kinds of ref:
-- {kind:"run", scenario, handoff, side, expects}: scenario is an id from <probe_results>; handoff is one of ${HANDOFFS.map((h) => `"${h.id}" (${h.label})`).join(', ')}; side is "before", "after" or "both"; with side "both", expects says whether that hand-off "differs" between before and after or is the "same" ("any" if it does not matter).
-- {kind:"test", test, expects}: test is a name from <test_names> (the full name, or Class.Method for all its cases); expects is "fails-before-passes-after", "passes-both", "fails-after" or "any".
-- {kind:"code", path, startLine, endLine}: lines in the head commit, for what you read in the code rather than saw in a run.
+You never write evidence values yourself; you point at them. A script resolves every pointer (a "ref") against the recordings and quotes the values next to your words. An item whose refs do not resolve, or resolve to something other than what its "expects" says, is moved out of the main comment into an "unverified" section. A ref is one string in one of three forms:
+- "run:<scenario>:<handoff>:<side>:<expects>": scenario is an id from <probe_results>; handoff is one of ${HANDOFFS.map((h) => `${h.id} (${h.label})`).join(', ')}; side is before, after or both; with side both, expects says whether that hand-off differs between before and after or is the same (any if it does not matter). Example: "run:dup-keys:generated:both:differs".
+- "test:<name>:<expects>": name is from <test_names> (the full name, or Class.Method for all its cases); expects is fails-before-passes-after, passes-both, fails-after or any.
+- "code:<path>:<start>-<end>": lines in the head commit, for what you read in the code rather than saw in a run. Example: "code:src/Foo/Bar.cs:120-124".
 Prefer run and test refs; a claim backed only by code refs is shown as "holds in the code, not run".
 
 - summary: two or three plain sentences: what the change does, whether it does what the issue asked, and the most important thing the human must know. Each sentence with refs.

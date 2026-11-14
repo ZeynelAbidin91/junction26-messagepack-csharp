@@ -21,22 +21,12 @@ export const Plan = z.object({
 const Status = z.enum(['changed', 'affected', 'same']);
 
 // The agent never writes evidence values. It points at them, and the script resolves each pointer
-// against the recorded runs, the test results or the code, and quotes what it finds.
-const RunRef = z.object({
-  kind: z.enum(['run']),
-  scenario: z.string(),
-  handoff: z.string(),
-  side: z.enum(['before', 'after', 'both']),
-  expects: z.enum(['differs', 'same', 'any']),
-});
-const TestRef = z.object({
-  kind: z.enum(['test']),
-  test: z.string(),
-  expects: z.enum(['fails-before-passes-after', 'passes-both', 'fails-after', 'any']),
-});
-const CodeRef = z.object({ kind: z.enum(['code']), path: z.string(), startLine: z.number(), endLine: z.number() });
-export const Ref = z.union([RunRef, TestRef, CodeRef]);
-const Refs = z.array(Ref);
+// against the recorded runs, the test results or the code, and quotes what it finds (lib/verify.mjs).
+// A pointer is one compact string, which keeps the structured-output grammar small:
+//   run:<scenario>:<handoff>:<before|after|both>:<differs|same|any>
+//   test:<test name>:<fails-before-passes-after|passes-both|fails-after|any>
+//   code:<path>:<line>[-<line>]
+const Refs = z.array(z.string());
 
 export const Analysis = z.object({
   summary: z.array(z.object({ sentence: z.string(), refs: Refs })),

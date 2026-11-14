@@ -28,8 +28,9 @@ test('the gate keeps resolvable items and moves every planted mistake out', { sk
   });
 
   const moved = unverified.map((u) => u.text).join('\n');
-  for (const planted of ['no evidence at all', 'wrong direction', 'never ran', 'all tests pass', 'private required']) assert.match(moved, new RegExp(planted), planted);
-  assert.equal(unverified.length, 5);
+  for (const planted of ['no evidence at all', 'wrong direction', 'never ran', 'all tests pass', 'private required', 'malformed pointer']) assert.match(moved, new RegExp(planted), planted);
+  assert.equal(unverified.length, 6);
+  assert.match(unverified.find((u) => /malformed/.test(u.text)).reasons[0], /malformed pointer/);
   assert.ok(!JSON.stringify([a.summary, a.attention, a.units, a.claims]).includes('PLANTED'), 'no planted item left in the main sections');
 
   const wrongWay = unverified.find((u) => /wrong direction/.test(u.text));

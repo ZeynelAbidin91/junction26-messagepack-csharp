@@ -25,6 +25,41 @@ export function testPattern(before, after) {
   return 'fails-before-passes-after';
 }
 
+const RUN_EXPECTS = ['differs', 'same', 'any'];
+const TEST_EXPECTS = ['fails-before-passes-after', 'passes-both', 'fails-after', 'any'];
+
+/** Turns a compact pointer string (see lib/schemas.mjs) into an object; objects pass through. */
+export function parseRef(r) {
+  if (typeof r !== 'string') return r;
+  const bad = (why) => ({ kind: 'invalid', text: r, why });
+  const [kind, ...rest] = r.trim().split(':');
+  if (kind === 'run') {
+    if (rest.length !== 4) return bad('expected run:<scenario>:<handoff>:<side>:<expects>');
+    const [scenario, handoff, side, expects] = rest;
+    if (!RUN_EXPECTS.includes(expects)) return bad(`expects must be one of ${RUN_EXPECTS.join(', ')}`);
+    return { kind, scenario, handoff, side, expects };
+  }
+  if (kind === 'test') {
+    if (rest.length < 2) return bad('expected test:<name>:<expects>');
+    const expects = rest.pop();
+    if (!TEST_EXPECTS.includes(expects)) return bad(`expects must be one of ${TEST_EXPECTS.join(', ')}`);
+    return { kind, test: rest.join(':'), expects };
+  }
+  if (kind === 'code') {
+    const m = /^(\d+)(?:-(\d+))?$/.exec(rest.pop() ?? '');
+    if (!m || !rest.length) return bad('expected code:<path>:<line>[-<line>]');
+    return { kind, path: rest.join(':'), startLine: Number(m[1]), endLine: Number(m[2] ?? m[1]) };
+  }
+  return bad('unknown kind');
+}
+
+/** Parses every pointer in an analysis in place. */
+export function normalizeRefs(a) {
+  const items = [...(a.summary ?? []), ...(a.attention ?? []), ...(a.claims ?? []), ...(a.units ?? []).flatMap((u) => u.examples ?? [])];
+  for (const x of items) if (Array.isArray(x.refs)) x.refs = x.refs.map(parseRef);
+  return a;
+}
+
 /**
  * Resolves every ref in the analysis. Mutates `a`: each ref gets `resolved: { ok, reason?, quote, anchor? }`,
  * failing items are removed from their section and returned in `unverified`, and claim verdicts that
@@ -37,6 +72,7 @@ export function verifyAnalysis(a, { before, after, results, handoffs, readCode, 
   const testNames = [...new Set([...Object.keys(results?.after ?? {}), ...Object.keys(results?.before ?? {})])];
 
   const resolveRef = (r) => {
+    if (r.kind === 'invalid') return { ok: false, reason: `malformed pointer ${code(r.text)}: ${r.why}` };
     if (r.kind === 'run') {
       const h = H[r.handoff];
       const anchor = `trace-${r.scenario}`;
@@ -92,6 +128,7 @@ export function verifyAnalysis(a, { before, after, results, handoffs, readCode, 
     return { ok: false, reason: 'unknown evidence kind' };
   };
 
+  normalizeRefs(a);
   const unverified = [];
   const check = (item, section, text, { allowEmpty = false } = {}) => {
     const refs = item.refs ?? [];
