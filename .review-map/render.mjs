@@ -40,7 +40,9 @@ const code = (s) => '`' + String(s).replace(/`/g, "'") + '`';
 const count = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 
 // A resolved evidence pointer, as quoted by the script, with a link to the trace it comes from.
-const quote = (r) => `${r.resolved?.quote ?? ''}${r.resolved?.anchor ? ` [↗](#${r.resolved.anchor})` : ''}`;
+// GitHub prefixes every name attribute in a comment with "user-content-"; linking to the prefixed name
+// lets the browser jump there by itself, without relying on GitHub's script to map the short form.
+const quote = (r) => `${r.resolved?.quote ?? ''}${r.resolved?.anchor ? ` [↗](#user-content-${r.resolved.anchor})` : ''}`;
 const quotes = (refs) => (refs ?? []).filter((r) => r.resolved?.ok).map(quote);
 
 export async function render(a, { analysisDir = '.' } = {}) {
