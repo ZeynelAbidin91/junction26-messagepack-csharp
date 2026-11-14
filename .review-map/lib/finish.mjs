@@ -12,7 +12,42 @@ import {
   ruleDecisions,
   sensitivity,
 } from './checks.mjs';
+import { FIXED } from './schemas.mjs';
 import { verifyAnalysis } from './verify.mjs';
+
+/**
+ * Enforces the fixed lists (severity, decision reason, verdicts, unit status) that the API schema leaves
+ * as plain strings. Unknown values fall back to the weakest meaning; a decision whose reason is not on
+ * the list is not shown as a decision at all.
+ */
+export function normalizeFixedLists(v) {
+  const notes = [];
+  const unverified = [];
+  const fix = (value, list, fallback, what) => {
+    const hit = list.find((x) => x.toLowerCase() === String(value ?? '').trim().toLowerCase());
+    if (hit) return hit;
+    notes.push(`${what}: "${value}" is not on the fixed list (${list.join(', ')}), so it is shown as ${fallback}`);
+    return fallback;
+  };
+  for (const n of v.nodes ?? []) n.status = fix(n.status, FIXED.status, 'same', `node ${n.label}`);
+  for (const u of v.units ?? []) {
+    u.status = fix(u.status, FIXED.status, 'same', `unit ${u.name}`);
+    if (!u.where) u.where = null;
+  }
+  for (const e of v.edges ?? []) if (!e.label) e.label = null;
+  for (const f of v.found ?? []) if (!f.computed) f.severity = fix(f.severity, FIXED.severity, 'NOTE', 'finding severity');
+  for (const r of v.requirements ?? []) r.verdict = fix(r.verdict, FIXED.requirement, 'not-shown', `${r.id} verdict`);
+  for (const c of v.claims ?? []) c.verdict = fix(c.verdict, FIXED.claim, 'not-verified', 'claim verdict');
+  v.decisions = (v.decisions ?? []).filter((d) => {
+    if (d.computed || FIXED.reason.includes(String(d.reason).trim().toLowerCase())) {
+      d.reason = String(d.reason).trim().toLowerCase();
+      return true;
+    }
+    unverified.push({ section: 'Refused to decide', text: d.question, reasons: [`its reason "${d.reason}" is not on the fixed list (${FIXED.reason.join(', ')})`], quotes: [] });
+    return false;
+  });
+  return { notes, unverified };
+}
 
 /**
  * @param a          the agent's (or a human's) analysis, in the Analysis shape
@@ -27,8 +62,11 @@ export function finishAnalysis(a, { plan, issueRef, pr, tests, before, after, mu
   v.found = [...computedFound({ tests }), ...(v.found ?? [])];
   v.decisions = [...ruleDecisions({ repro, issueRef }), ...(v.decisions ?? [])];
 
+  const fixed = normalizeFixedLists(v);
   const { results } = tests;
   const { unverified, downgraded } = verifyAnalysis(v, { before, after, results, handoffs, readCode, blob, extraSides });
+  unverified.push(...fixed.unverified);
+  downgraded.push(...fixed.notes);
 
   const table = requirementTable({ plan, verdicts: v.requirements ?? [], before, after, handoffs, repro });
   downgraded.push(...table.downgraded);

@@ -27,7 +27,16 @@ export const Plan = z.object({
   scenarios: z.array(Scenario),
 });
 
-const Status = z.enum(['changed', 'affected', 'same']);
+// Fixed lists are enforced by the script (lib/finish.mjs, normalizeFixedLists), not by the grammar: enums
+// inside nested arrays make the structured-output grammar too large for the API.
+export const FIXED = {
+  status: ['changed', 'affected', 'same'],
+  severity: ['WARNING', 'CAUTION', 'IMPORTANT', 'NOTE'],
+  reason: ['intent', 'trade-off', 'unreproduced', 'out-of-reach'],
+  requirement: ['met', 'partly', 'not-met', 'not-shown'],
+  claim: ['verified', 'partly', 'not-verified', 'contradicted'],
+};
+const Status = z.string();
 
 // The agent never writes evidence values. It points at them, and the script resolves each pointer
 // against the recorded runs, the test results or the code, and quotes what it finds (lib/verify.mjs).
@@ -40,13 +49,13 @@ const Refs = z.array(z.string());
 export const Analysis = z.object({
   summary: z.array(z.object({ sentence: z.string(), refs: Refs })),
   nodes: z.array(z.object({ id: z.string(), label: z.string(), sub: z.string(), status: Status })),
-  edges: z.array(z.object({ from: z.string(), to: z.string(), label: z.string().nullable(), changed: z.boolean() })),
+  edges: z.array(z.object({ from: z.string(), to: z.string(), label: z.string(), changed: z.boolean() })),
   // The top of the comment: what the review found, what it refused to decide, and what it did not check.
-  found: z.array(z.object({ statement: z.string(), severity: z.enum(['WARNING', 'CAUTION', 'IMPORTANT', 'NOTE']), refs: Refs })),
+  found: z.array(z.object({ statement: z.string(), severity: z.string(), refs: Refs })),
   decisions: z.array(
     z.object({
       question: z.string(),
-      reason: z.enum(['intent', 'trade-off', 'unreproduced', 'out-of-reach']),
+      reason: z.string(),
       detail: z.string(),
       wouldSettleIt: z.string(),
       options: z.array(z.string()),
@@ -54,7 +63,7 @@ export const Analysis = z.object({
     }),
   ),
   notChecked: z.array(z.object({ item: z.string(), reason: z.string(), riskIfWrong: z.string(), howToCheck: z.string() })),
-  requirements: z.array(z.object({ id: z.string(), verdict: z.enum(['met', 'partly', 'not-met', 'not-shown']), note: z.string(), refs: Refs })),
+  requirements: z.array(z.object({ id: z.string(), verdict: z.string(), note: z.string(), refs: Refs })),
   traces: z.array(
     z.object({
       id: z.string(),
@@ -67,7 +76,7 @@ export const Analysis = z.object({
     z.object({
       name: z.string(),
       status: Status,
-      where: z.string().nullable(),
+      where: z.string(),
       receives: z.string(),
       emits: z.string(),
       change: z.string(),
@@ -78,7 +87,7 @@ export const Analysis = z.object({
     z.object({
       claim: z.string(),
       source: z.string(),
-      verdict: z.enum(['verified', 'partly', 'not-verified', 'contradicted']),
+      verdict: z.string(),
       evidence: z.string(),
       refs: Refs,
     }),

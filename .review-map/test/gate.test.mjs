@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { handoffs } from '../adapters/messagepack/handoffs.mjs';
 import { ownerResolver, reproduction, sdkSatisfies } from '../lib/checks.mjs';
-import { finishAnalysis } from '../lib/finish.mjs';
+import { finishAnalysis, normalizeFixedLists } from '../lib/finish.mjs';
 import { Analysis } from '../lib/schemas.mjs';
 import { verifyAnalysis } from '../lib/verify.mjs';
 
@@ -115,6 +115,29 @@ test('the issue is only "fixed" when its symptom was seen on the before side', {
   // Script findings come first and are marked computed.
   assert.equal(fin.verified.found[0].computed, true);
   assert.match(fin.verified.found[0].statement, /4 of 8 new tests also pass on the old code/);
+});
+
+test('fixed lists are enforced by the script, not the grammar', () => {
+  const v = {
+    nodes: [{ id: 'A', label: 'A', sub: '', status: 'Changed' }],
+    edges: [{ from: 'A', to: 'B', label: '', changed: false }],
+    units: [{ name: 'u', status: 'weird', where: '' }],
+    found: [{ statement: 's', severity: 'urgent', refs: [] }],
+    decisions: [{ question: 'Is it wanted?', reason: 'Intent' }, { question: 'Made-up reason?', reason: 'vibes' }],
+    requirements: [{ id: 'R1', verdict: 'done' }],
+    claims: [{ claim: 'c', verdict: 'true' }],
+  };
+  const { notes, unverified } = normalizeFixedLists(v);
+  assert.equal(v.nodes[0].status, 'changed');
+  assert.equal(v.units[0].status, 'same');
+  assert.equal(v.units[0].where, null);
+  assert.equal(v.edges[0].label, null);
+  assert.equal(v.found[0].severity, 'NOTE');
+  assert.equal(v.requirements[0].verdict, 'not-shown');
+  assert.equal(v.claims[0].verdict, 'not-verified');
+  assert.deepEqual(v.decisions.map((d) => d.reason), ['intent']);
+  assert.match(unverified[0].reasons[0], /not on the fixed list/);
+  assert.equal(notes.length, 4, 'a case difference ("Changed") is accepted without a note');
 });
 
 test('decision owners come only from people a human named', () => {
