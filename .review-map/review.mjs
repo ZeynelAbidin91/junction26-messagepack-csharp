@@ -118,7 +118,6 @@ function evidence() {
     outDir: resolve(out, 'evidence'),
     rollForwardSdk: opt['rollforward-sdk'],
   });
-  summary.sdk = spawnSync('dotnet', ['--version'], { encoding: 'utf8' }).stdout.trim();
   summary.runner = process.env.RUNNER_OS ? `GitHub Actions ${process.env.RUNNER_OS}` : process.platform;
   writeJson('evidence/tests.json', summary);
   log(`evidence: probe after=${summary.probe.after} before=${summary.probe.before}; tests after=${summary.after.passed ?? '-'}/${summary.after.total ?? '-'} before=${summary.before.passed ?? '-'}/${summary.before.total ?? '-'}; ${summary.changes.length} changed outcome`);

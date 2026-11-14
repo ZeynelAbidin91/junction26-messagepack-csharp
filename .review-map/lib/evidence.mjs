@@ -278,6 +278,8 @@ export function collectEvidence({ repo, adapter, mergeBase, head, scenariosFile,
 
   try {
     if (rollForwardSdk) writeFileSync(gj, readFileSync(gj, 'utf8').replace('"rollForward": "patch"', '"rollForward": "latestMajor"'));
+    // The SDK the builds below actually use: asked inside the repo, where its global.json applies.
+    const sdk = sh('dotnet', ['--version'], { cwd: repo }).stdout.trim() || 'unknown';
     copyFileSync(adapter.probeSource, join(repo, adapter.probeTarget));
 
     if (probeOnly) {
@@ -288,7 +290,7 @@ export function collectEvidence({ repo, adapter, mergeBase, head, scenariosFile,
         revert(tests);
         before = runProbe(repo, adapter, scenariosFile, outDir, 'before');
       }
-      return { probe: { after: after.probe, before: before.probe } };
+      return { probe: { after: after.probe, before: before.probe }, sdk };
     }
 
     // After, with code coverage on, so the changed lines that ran can be counted.
@@ -345,6 +347,7 @@ export function collectEvidence({ repo, adapter, mergeBase, head, scenariosFile,
       probe: { after: afterProbe.probe, before: beforeProbe.probe },
       coverage,
       mutation,
+      sdk,
       pinnedSdk,
       rollForwardSdk,
       changedFiles: files,
