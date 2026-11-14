@@ -112,3 +112,8 @@ export function toApiSchema(schema) {
   walk(js);
   return js;
 }
+
+// The analysis is asked for in two parallel calls, because one schema with every section compiles to a
+// structured-output grammar larger than the API accepts. Together they make one Analysis.
+export const AnalysisTop = Analysis.pick({ summary: true, found: true, decisions: true, notChecked: true, requirements: true, claims: true });
+export const AnalysisMap = Analysis.pick({ nodes: true, edges: true, traces: true, units: true });

@@ -27,7 +27,7 @@ import { budgetedDiff, linkedIssue, mergeBaseOf, pullRequest } from './lib/conte
 import { collectEvidence } from './lib/evidence.mjs';
 import { fingerprints, reproduction } from './lib/checks.mjs';
 import { finishAnalysis } from './lib/finish.mjs';
-import { Analysis, Plan } from './lib/schemas.mjs';
+import { Analysis, AnalysisMap, AnalysisTop, Plan } from './lib/schemas.mjs';
 import { MARKER, render } from './render.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -210,7 +210,16 @@ Write the review map.`;
     ({ value: a, model = 'recorded', usage = null } = JSON.parse(readFileSync(resolve(opt['agent-output']), 'utf8')));
     a = Analysis.parse(a);
   } else {
-    ({ value: a, model, usage } = await ask({ system, user, schema: Analysis, label: 'analyze' }));
+    // Two parallel calls with the same context: one schema with every section is too large a grammar.
+    const only = (parts) => `${user}\n\nIn this response, write only these parts of the review map: ${parts}. The other parts are written separately.`;
+    const [top, map] = await Promise.all([
+      ask({ system, user: only('summary, found, decisions, notChecked, requirements, claims'), schema: AnalysisTop, label: 'analyze (lists and claims)' }),
+      ask({ system, user: only('nodes, edges, traces, units'), schema: AnalysisMap, label: 'analyze (map, traces and units)' }),
+    ]);
+    a = Analysis.parse({ ...top.value, ...map.value });
+    model = top.model;
+    const sum = (k) => (top.usage?.[k] ?? 0) + (map.usage?.[k] ?? 0);
+    usage = { input_tokens: sum('input_tokens'), output_tokens: sum('output_tokens') };
   }
   writeJson('agent-output.json', { value: a, model, usage });
 
