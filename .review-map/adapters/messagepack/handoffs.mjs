@@ -62,15 +62,7 @@ export function handoffs({ code }) {
       brief: (s) => {
         const ids = new Map();
         for (const d of [...s.generatorDiagnostics, ...s.analyzerDiagnostics]) ids.set(d.id, (ids.get(d.id) ?? 0) + 1);
-        const runtimeBrief = (s, name) => {
-    if (!s.runtime || s.runtime.error || !s.runtime.built) return 'did not run';
-    const cfg = s.runtime.configs?.find((c) => c.name === name);
-    if (!cfg) return 'no generated resolver';
-    if (cfg.error) return `throws ${cfg.error.split(':')[0]}`;
-    return cfg.valuesOut === s.runtime.valuesIn ? `out ${cfg.valuesOut} (intact)` : `out ${cfg.valuesOut} ⚠️ value changed`;
-  };
-
-  const list = [...ids].map(([id, n]) => (n > 1 ? `${id} ×${n}` : id)).join(', ');
+        const list = [...ids].map(([id, n]) => (n > 1 ? `${id} ×${n}` : id)).join(', ');
         return `${list || 'none'}, ${buildFails(s) ? 'build fails' : 'build passes'}`;
       },
       cell: (s) => {

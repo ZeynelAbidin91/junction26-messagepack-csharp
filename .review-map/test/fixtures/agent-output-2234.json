@@ -1,0 +1,66 @@
+{
+  "model": "fixture (hand-written agent output with planted mistakes)",
+  "usage": null,
+  "value": {
+    "summary": [
+      { "sentence": "Duplicate or mixed keys no longer crash the type collector; it now keeps one member.", "refs": [
+        { "kind": "run", "scenario": "generated-dup-string-keys-fields", "handoff": "model", "side": "both", "expects": "differs" }
+      ] },
+      { "sentence": "The kept formatter silently loses the second member's value.", "refs": [
+        { "kind": "run", "scenario": "generated-dup-string-keys-fields", "handoff": "rtGenerated", "side": "both", "expects": "differs" }
+      ] },
+      { "sentence": "PLANTED: a sentence with no evidence at all.", "refs": [] }
+    ],
+    "nodes": [
+      { "id": "TC", "label": "TypeCollector", "sub": "builds the model", "status": "changed" },
+      { "id": "GEN", "label": "Templates", "sub": "emit formatters", "status": "affected" },
+      { "id": "RT", "label": "Run time", "sub": "serialize", "status": "affected" }
+    ],
+    "edges": [
+      { "from": "TC", "to": "GEN", "label": "① model", "changed": true },
+      { "from": "GEN", "to": "RT", "label": "③ C# files", "changed": true }
+    ],
+    "attention": [
+      { "level": "WARNING", "title": "A duplicate key now compiles into a formatter that drops data", "detail": "Decide whether a duplicate key should stay a build error instead.", "refs": [
+        { "kind": "run", "scenario": "generated-dup-string-keys-fields", "handoff": "generated", "side": "both", "expects": "differs" },
+        { "kind": "run", "scenario": "generated-dup-string-keys-fields", "handoff": "rtGenerated", "side": "after", "expects": "any" }
+      ] },
+      { "level": "CAUTION", "title": "PLANTED: wrong direction", "detail": "Claims the suppressed duplicate-int case now generates files.", "refs": [
+        { "kind": "run", "scenario": "suppressed-dup-int-keys", "handoff": "generated", "side": "both", "expects": "differs" }
+      ] },
+      { "level": "TIP", "title": "Valid types are unaffected", "detail": "The control input behaves the same on both sides.", "refs": [
+        { "kind": "run", "scenario": "suppressed-valid-control", "handoff": "rtDefault", "side": "both", "expects": "same" }
+      ] }
+    ],
+    "traces": [
+      { "id": "generated-dup-string-keys-fields", "title": "Two fields share a string key", "story": "① the model keeps F1 only, so ③ emits a formatter for one member and ④ reads F2 back as 0.", "where": [] }
+    ],
+    "units": [
+      { "name": "TypeCollector member collection", "status": "changed", "where": null, "receives": "a type symbol", "emits": "the model", "change": "skips a member whose key is taken",
+        "examples": [
+          { "note": "Mixed keys: the collector used to throw, now keeps A.", "refs": [
+            { "kind": "run", "scenario": "mixed-keys-props-int-first", "handoff": "model", "side": "both", "expects": "differs" }
+          ] },
+          { "note": "PLANTED: cites a scenario that never ran.", "refs": [
+            { "kind": "run", "scenario": "no-such-scenario", "handoff": "model", "side": "both", "expects": "differs" }
+          ] }
+        ] }
+    ],
+    "claims": [
+      { "claim": "Duplicate int keys are reported without an analyzer failure", "source": "test name", "verdict": "verified", "evidence": "The new test fails on the old code and passes now.", "refs": [
+        { "kind": "test", "test": "SuppressSourceGenerationAnalyzerTests.DuplicateIntKeysAreReportedWithoutAnalyzerFailure", "expects": "fails-before-passes-after" }
+      ] },
+      { "claim": "PLANTED: all tests pass", "source": "PR text", "verdict": "verified", "evidence": "all 170 tests passed", "refs": [
+        { "kind": "test", "test": "all 170 tests passed", "expects": "any" }
+      ] },
+      { "claim": "PLANTED: private required members are newly reported", "source": "test name", "verdict": "verified", "evidence": "new test", "refs": [
+        { "kind": "test", "test": "AllowPrivateRequiredIsReported", "expects": "fails-before-passes-after" }
+      ] },
+      { "claim": "A colliding member is skipped rather than added", "source": "code comment", "verdict": "verified", "evidence": "The guard is in the code.", "refs": [
+        { "kind": "code", "path": "src/MessagePack.SourceGenerator/CodeAnalysis/TypeCollector.cs", "startLine": 1023, "endLine": 1026 }
+      ] },
+      { "claim": "Fixes the issue's main symptom", "source": "PR title", "verdict": "not-verified", "evidence": "No scenario reproduces the issue's report.", "refs": [] }
+    ],
+    "limits": ["Fixture: not a real review."]
+  }
+}

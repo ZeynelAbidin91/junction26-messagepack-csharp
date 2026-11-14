@@ -19,13 +19,30 @@ export const Plan = z.object({
 });
 
 const Status = z.enum(['changed', 'affected', 'same']);
-const Evidence = z.enum(['observed', 'static', 'stated', 'none']);
+
+// The agent never writes evidence values. It points at them, and the script resolves each pointer
+// against the recorded runs, the test results or the code, and quotes what it finds.
+const RunRef = z.object({
+  kind: z.enum(['run']),
+  scenario: z.string(),
+  handoff: z.string(),
+  side: z.enum(['before', 'after', 'both']),
+  expects: z.enum(['differs', 'same', 'any']),
+});
+const TestRef = z.object({
+  kind: z.enum(['test']),
+  test: z.string(),
+  expects: z.enum(['fails-before-passes-after', 'passes-both', 'fails-after', 'any']),
+});
+const CodeRef = z.object({ kind: z.enum(['code']), path: z.string(), startLine: z.number(), endLine: z.number() });
+export const Ref = z.union([RunRef, TestRef, CodeRef]);
+const Refs = z.array(Ref);
 
 export const Analysis = z.object({
-  summary: z.string(),
+  summary: z.array(z.object({ sentence: z.string(), refs: Refs })),
   nodes: z.array(z.object({ id: z.string(), label: z.string(), sub: z.string(), status: Status })),
   edges: z.array(z.object({ from: z.string(), to: z.string(), label: z.string().nullable(), changed: z.boolean() })),
-  attention: z.array(z.object({ level: z.enum(['WARNING', 'CAUTION', 'IMPORTANT', 'TIP', 'NOTE']), title: z.string(), detail: z.string() })),
+  attention: z.array(z.object({ level: z.enum(['WARNING', 'CAUTION', 'IMPORTANT', 'TIP', 'NOTE']), title: z.string(), detail: z.string(), refs: Refs })),
   traces: z.array(
     z.object({
       id: z.string(),
@@ -42,7 +59,7 @@ export const Analysis = z.object({
       receives: z.string(),
       emits: z.string(),
       change: z.string(),
-      examples: z.array(z.object({ input: z.string(), before: z.string(), after: z.string(), evidence: Evidence, ref: z.string().nullable() })),
+      examples: z.array(z.object({ note: z.string(), refs: Refs })),
     }),
   ),
   claims: z.array(
@@ -51,6 +68,7 @@ export const Analysis = z.object({
       source: z.string(),
       verdict: z.enum(['verified', 'partly', 'not-verified', 'contradicted']),
       evidence: z.string(),
+      refs: Refs,
     }),
   ),
   limits: z.array(z.string()),

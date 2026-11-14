@@ -30,6 +30,16 @@ export default {
   probeTarget: 'tests/MessagePack.SourceGenerator.Tests/ReviewMapProbe.cs',
   probeFilter: 'FullyQualifiedName~ReviewMapProbe',
 
+  // A known break, applied to the after code for one extra probe run, to show the probe can see a
+  // difference when there is one. It drops the first member of every collected type from the model.
+  // The line exists unchanged on the base and on all four challenge branches.
+  mutation: {
+    description: 'TypeCollector drops the first member of every type it collects',
+    file: 'src/MessagePack.SourceGenerator/CodeAnalysis/TypeCollector.cs',
+    find: 'members: isIntKey ? intMembers.Values.Select(v => v.Info).ToArray() : stringMembers.Values.Select(v => v.Info).ToArray(),',
+    replace: 'members: isIntKey ? intMembers.Values.Select(v => v.Info).Skip(1).ToArray() : stringMembers.Values.Select(v => v.Info).Skip(1).ToArray(),',
+  },
+
   // Scenarios from branch 2283, shown to the agent as a worked example of the scenario format.
   exampleScenarios: JSON.parse(readFileSync(join(here, 'example-scenarios.json'), 'utf8')),
 };

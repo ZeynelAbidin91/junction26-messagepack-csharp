@@ -25,6 +25,7 @@ const VERDICT = {
   partly: '🟡 Partly holds',
   'not-verified': '⚠️ Not verified',
   contradicted: '❌ Does not hold',
+  'code-only': '🔎 Holds in the code, not run',
 };
 const STATUS = {
   changed: 'changed by this PR',
@@ -38,15 +39,41 @@ const mm = (s) => String(s).replace(/"/g, '#quot;');
 const code = (s) => '`' + String(s).replace(/`/g, "'") + '`';
 const count = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 
+// A resolved evidence pointer, as quoted by the script, with a link to the trace it comes from.
+const quote = (r) => `${r.resolved?.quote ?? ''}${r.resolved?.anchor ? ` [↗](#${r.resolved.anchor})` : ''}`;
+const quotes = (refs) => (refs ?? []).filter((r) => r.resolved?.ok).map(quote);
+
 export async function render(a, { analysisDir = '.' } = {}) {
   const out = [];
   const p = (...lines) => out.push(...lines);
+  const replayFor = (id) => (a.integrity?.replay ? a.integrity.replay.replace('{id}', id) : null);
 
   p(MARKER);
   p(`## Review map · \`${a.pr.branch}\``);
   p('');
-  p(a.summary);
+  if (typeof a.summary === 'string') p(a.summary);
+  else if (a.summary?.length) {
+    p(a.summary.map((s) => s.sentence).join(' '));
+    p('');
+    p('<details>');
+    p('<summary>Evidence behind these sentences, copied from the runs by a script</summary>');
+    p('');
+    for (const s of a.summary) {
+      p(`- ${s.sentence}`);
+      for (const q of quotes(s.refs)) p(`  - ${q}`);
+    }
+    p('');
+    p('</details>');
+  } else p('_No summary sentence could be backed by the recorded evidence; see "Not backed by the evidence" below._');
   p('');
+
+  // ---- confidence: computed by the script, shown before anything else -----------------------
+  if (a.confidence?.length) {
+    p('> [!CAUTION]');
+    p('> **Reduced confidence in this run.** Read the findings below with these in mind:');
+    for (const c of a.confidence) p(`> - ${c}`);
+    p('');
+  }
 
   const changed = a.nodes.filter((n) => n.status === 'changed').length;
   const affected = a.nodes.filter((n) => n.status === 'affected').length;
@@ -56,8 +83,11 @@ export async function render(a, { analysisDir = '.' } = {}) {
     [
       `**${count(changed, 'unit', 'units')} changed**`,
       `**${count(affected, 'unit', 'units')} behave differently downstream**`,
-      `**${a.claims.length} author claims checked:** ${verdicts.verified ?? 0} hold, ${open} need you`,
-    ].join(' · '),
+      `**${a.claims.length} author claims checked:** ${verdicts.verified ?? 0} hold${verdicts['code-only'] ? `, ${verdicts['code-only']} hold in the code only` : ''}, ${open} need you`,
+      a.unverified ? `**${count(a.unverified.length, 'reviewer statement', 'reviewer statements')} not backed by the evidence**` : null,
+    ]
+      .filter(Boolean)
+      .join(' · '),
   );
   p('');
 
@@ -77,14 +107,34 @@ export async function render(a, { analysisDir = '.' } = {}) {
   p('');
 
   // ---- what needs a human -----------------------------------------------------------------
-  if (a.attention?.length) {
+  if (a.attention?.length || a.computed?.length) {
     p('### Start here');
     p('');
-    for (const item of a.attention) {
+    for (const item of a.computed ?? []) {
       p(`> [!${item.level ?? 'WARNING'}]`);
       p(`> **${item.title}**`);
       p('>');
       for (const line of item.detail.split('\n')) p(`> ${line}`);
+      p('>');
+      p('> <sub>Computed by the script from the recorded runs; the reviewing agent cannot word or remove this item.</sub>');
+      p('');
+    }
+    for (const item of a.attention ?? []) {
+      p(`> [!${item.level ?? 'WARNING'}]`);
+      p(`> **${item.title}**`);
+      p('>');
+      for (const line of item.detail.split('\n')) p(`> ${line}`);
+      const qs = quotes(item.refs);
+      if (qs.length) {
+        p('>');
+        p('> Evidence, copied from the runs:');
+        for (const q of qs) p(`> - ${q}`);
+      }
+      const firstRun = (item.refs ?? []).find((r) => r.kind === 'run' && r.resolved?.ok);
+      if (firstRun && replayFor(firstRun.scenario)) {
+        p('>');
+        p(`> <sub>Re-check: \`${replayFor(firstRun.scenario)}\`</sub>`);
+      }
       p('');
     }
   }
@@ -111,6 +161,8 @@ export async function render(a, { analysisDir = '.' } = {}) {
       const f = after.find((s) => s.id === c.id);
       const shown = f ?? b;
       if (!shown) return;
+      p(`<a name="trace-${c.id}"></a>`);
+      p('');
       p(`<details${i === 0 ? ' open' : ''}>`);
       p(`<summary><b>${c.title}</b></summary>`);
       p('');
@@ -169,6 +221,14 @@ export async function render(a, { analysisDir = '.' } = {}) {
         p(`| ${r.h.label}<br>${TAG[tagOf(r)]}${where} | ${cell(r.x.show)} | ${cell(r.y.show)} |`);
       }
       p('');
+      if (replayFor(c.id)) {
+        p(`Scenario \`${c.id}\`. Re-run it yourself and compare with this table:`);
+        p('');
+        p('```bash');
+        p(replayFor(c.id));
+        p('```');
+        p('');
+      }
       p('</details>');
       p('');
       p(c.story);
@@ -200,6 +260,30 @@ export async function render(a, { analysisDir = '.' } = {}) {
       p('</details>');
       p('');
     }
+    if (t.newTests?.length) {
+      const VERDICT_T = {
+        discriminates: '✅ fails before, passes after: shows the change works',
+        'passes-both': '⚠️ passes on the old code too: does not show the change works',
+        'fails-after': '❌ fails on this PR',
+        'not-run-before': '❔ could not run on the old code (the tests were reverted)',
+        'missing-before': '❔ did not run on the old code',
+      };
+      const weak = t.newTests.filter((x) => x.verdict !== 'discriminates').length;
+      p(`<details${weak ? ' open' : ''}>`);
+      p(`<summary>${count(t.newTests.length, 'new test', 'new tests')} in this PR, run against the old code: ${t.newTests.length - weak} show the change works</summary>`);
+      p('');
+      p('| New test | Before | After | What it shows |');
+      p('|---|---|---|---|');
+      for (const x of t.newTests.slice(0, 60)) p(`| ${code(x.name.split('.').slice(-2).join('.'))} | ${x.before ?? 'did not exist'} | ${x.after} | ${VERDICT_T[x.verdict]} |`);
+      p('');
+      p('</details>');
+      p('');
+    }
+    if (t.coverage?.measured) {
+      const c = t.coverage;
+      p(`**Changed lines that ran:** ${c.reached} of ${c.executable} executable changed lines were reached (${c.byProbe} by a scenario, ${c.byTests} by a test)${c.removedLines ? `; ${c.removedLines} removed lines are checked only by the before side` : ''}. Measured with code coverage on the after side.`);
+      p('');
+    }
   }
 
   // ---- unit cards -------------------------------------------------------------------------
@@ -217,10 +301,14 @@ export async function render(a, { analysisDir = '.' } = {}) {
     p(`| What changed | ${cell(u.change)} |`);
     p('');
     if (u.examples?.length) {
-      p('| Input | Before | After | Evidence |');
-      p('|---|---|---|---|');
-      for (const x of u.examples) {
-        p(`| ${cell(x.input)} | ${cell(x.before)} | ${cell(x.after)} | ${EVIDENCE[x.evidence]}${x.ref ? `<br>${cell(x.ref)}` : ''} |`);
+      if (u.examples[0].refs) {
+        p('| What it shows | Evidence, copied from the runs by the script |');
+        p('|---|---|');
+        for (const x of u.examples) p(`| ${cell(x.note)} | ${cell(quotes(x.refs).join('\n'))} |`);
+      } else {
+        p('| Input | Before | After | Evidence |');
+        p('|---|---|---|---|');
+        for (const x of u.examples) p(`| ${cell(x.input)} | ${cell(x.before)} | ${cell(x.after)} | ${EVIDENCE[x.evidence]}${x.ref ? `<br>${cell(x.ref)}` : ''} |`);
       }
       p('');
     }
@@ -233,8 +321,24 @@ export async function render(a, { analysisDir = '.' } = {}) {
   p('');
   p('| Claim | Made in | Verdict | Why |');
   p('|---|---|---|---|');
-  for (const c of a.claims) p(`| ${cell(c.claim)} | ${cell(c.source)} | ${VERDICT[c.verdict]} | ${cell(c.evidence)} |`);
+  for (const c of a.claims) {
+    const qs = quotes(c.refs);
+    p(`| ${cell(c.claim)} | ${cell(c.source)} | ${VERDICT[c.verdict]} | ${cell(c.evidence)}${qs.length ? `<br><sub>${cell(qs.join('\n'))}</sub>` : ''} |`);
+  }
   p('');
+
+  // ---- items the gate removed ---------------------------------------------------------------
+  if (a.unverified?.length) {
+    p('### Not backed by the evidence');
+    p('');
+    p("The reviewing agent wrote these, but the evidence it pointed to does not exist or does not show what it said, so they were moved out of the sections above. Treat them as unchecked opinions.");
+    p('');
+    for (const u of a.unverified) {
+      p(`- **${u.section}:** ${u.text.replace(/\n+/g, ' ')}`);
+      p(`  <br><sub>Why it was moved: ${u.reasons.join('; ')}${u.quotes?.length ? `. What the runs actually show: ${u.quotes.join('; ')}` : ''}</sub>`);
+    }
+    p('');
+  }
 
   // ---- method -----------------------------------------------------------------------------
   p('<details>');
@@ -242,18 +346,34 @@ export async function render(a, { analysisDir = '.' } = {}) {
   p('');
   p('**Run for real**');
   for (const m of a.method.observed) p(`- ${m}`);
+  const s = a.sensitivity;
+  if (s?.ran) {
+    const blind = (s.rows ?? []).filter((r) => !r.handoffs.length).map((r) => code(r.id));
+    p(
+      `- Can the probe see a break? With a known break applied to the after code (${s.description}), the probe showed a difference in ${s.detected} of ${s.scenarios} scenarios${s.where?.length ? `, at ${s.where.join(', ')}` : ''}. ` +
+        (!s.detected
+          ? 'So "no difference" in this review is weak evidence.'
+          : blind.length
+            ? `It did not show in ${blind.join(', ')}, so for those inputs "no difference" says less.`
+            : 'So a "no difference" in any scenario here would have shown a break of this kind.'),
+    );
+  }
   p('');
   p('**Not covered**');
   for (const m of a.method.limits) p(`- ${m}`);
   if (a.method.downgraded?.length) {
     p('');
-    p('**Reviewer statements the script downgraded**');
+    p('**Reviewer verdicts the script downgraded**');
     for (const m of a.method.downgraded) p(`- ${m}`);
   }
   p('');
   p('</details>');
   p('');
   p(`<sub>Review map for \`${a.pr.head}\` against \`${a.pr.base}\`. ${a.pr.generatedBy ?? 'Generated by a reviewing agent that did not write this change.'}</sub>`);
+  if (a.integrity?.files?.length) {
+    p('');
+    p(`<sub>Evidence${a.integrity.artifact ? ` ([download](${a.integrity.artifact}), kept 90 days)` : ''}, SHA-256: ${a.integrity.files.map((f) => `${f.name} \`${f.sha256.slice(0, 16)}\``).join(' · ')}</sub>`);
+  }
 
   let md = out.join('\n') + '\n';
   // Never hyperlink upstream issues: a link from a public comment adds an entry to their timeline.

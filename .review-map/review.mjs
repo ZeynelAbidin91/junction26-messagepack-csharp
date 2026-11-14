@@ -6,6 +6,8 @@
 //   node review.mjs analyze  --repo <checkout> --out <dir>
 //   node review.mjs post     --out <dir>
 //   node review.mjs all      (the four steps in order, for local runs)
+//   node review.mjs replay   --scenario <id> (--run <workflow run id> | --from <dir>) --repo <checkout of the reviewed commit>
+//                            re-runs one input before and after and compares it with the recording
 //
 // plan      The reviewing agent reads the diff and the issue and chooses real inputs to run.      (needs API key)
 // evidence  Runs those inputs and the repo's tests on the code before and after the change.         (runs PR code, no secrets)
@@ -16,13 +18,15 @@
 // runs on a machine that holds the API key.
 
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { ask } from './lib/claude.mjs';
 import { budgetedDiff, linkedIssue, mergeBaseOf, pullRequest } from './lib/context.mjs';
 import { collectEvidence } from './lib/evidence.mjs';
+import { computedAttention, confidence, fingerprints, sensitivity } from './lib/checks.mjs';
+import { verifyAnalysis } from './lib/verify.mjs';
 import { Analysis, Plan } from './lib/schemas.mjs';
 import { MARKER, render } from './render.mjs';
 
@@ -36,6 +40,10 @@ const { positionals, values: opt } = parseArgs({
     out: { type: 'string', default: 'review-map-out' },
     adapter: { type: 'string', default: 'messagepack' },
     'rollforward-sdk': { type: 'boolean', default: false },
+    scenario: { type: 'string' },
+    run: { type: 'string' },
+    from: { type: 'string' },
+    'agent-output': { type: 'string' },
   },
 });
 const step = positionals[0];
@@ -130,7 +138,10 @@ async function analyze() {
   };
   const before = load('probe-before.json');
   const after = load('probe-after.json');
-  const { digest } = await import(new URL(`./adapters/${adapter.name}/handoffs.mjs`, import.meta.url));
+  const mutant = load('probe-mutant.json');
+  const { digest, handoffs } = await import(new URL(`./adapters/${adapter.name}/handoffs.mjs`, import.meta.url));
+  const code = (s) => '`' + String(s).replace(/`/g, "'") + '`';
+  const HANDOFFS = handoffs({ code });
   const probeDigest = plan.scenarios.map((s) => {
     const b = before.find((x) => x.id === s.id);
     const f = after.find((x) => x.id === s.id);
@@ -140,20 +151,28 @@ async function analyze() {
   });
   const diff = budgetedDiff(repo, ctx.mergeBase, ctx.head, adapter);
   const blob = `https://github.com/${ctx.slug}/blob/${ctx.head}`;
+  const { results, ...testSummary } = tests;
+  const testNames = [...new Set([...Object.keys(results?.after ?? {}), ...Object.keys(results?.before ?? {})])];
 
   const system = `${ROLE}
 
-In this step you explain the change from evidence. You get the diff, the probe results for the scenarios you chose earlier (recorded on the code before and after the change), and the repo's test results on both sides. Produce the review map:
+In this step you explain the change from evidence. You get the diff, the probe results for the scenarios you chose earlier (recorded on the code before and after the change), and the repo's test results on both sides. Produce the review map.
 
-- summary: two or three plain sentences: what the change does, whether it does what the issue asked, and the most important thing the human must know.
+You never write evidence values yourself; you point at them. A script resolves every pointer (a "ref") against the recordings and quotes the values next to your words. An item whose refs do not resolve, or resolve to something other than what its "expects" says, is moved out of the main comment into an "unverified" section. The kinds of ref:
+- {kind:"run", scenario, handoff, side, expects}: scenario is an id from <probe_results>; handoff is one of ${HANDOFFS.map((h) => `"${h.id}" (${h.label})`).join(', ')}; side is "before", "after" or "both"; with side "both", expects says whether that hand-off "differs" between before and after or is the "same" ("any" if it does not matter).
+- {kind:"test", test, expects}: test is a name from <test_names> (the full name, or Class.Method for all its cases); expects is "fails-before-passes-after", "passes-both", "fails-after" or "any".
+- {kind:"code", path, startLine, endLine}: lines in the head commit, for what you read in the code rather than saw in a run.
+Prefer run and test refs; a claim backed only by code refs is shown as "holds in the code, not run".
+
+- summary: two or three plain sentences: what the change does, whether it does what the issue asked, and the most important thing the human must know. Each sentence with refs.
 - nodes and edges: the pipeline from <pipeline>, only the stages this change touches or affects plus their neighbours (4 to 8 nodes). status "changed" if the PR edits that stage's code, "affected" if its code is untouched but its behaviour differs in the evidence, "same" otherwise. Short ids (letters only). Label the edges that match recorded hand-offs with ① model, ② diagnostics, ③ C# files, ④ bytes; mark an edge changed when the evidence shows different data crossing it.
-- attention: what needs the human, most important first. Each item says the input, what happened before, what happens after, and the decision the human has to make. End with one TIP listing what the human can stop worrying about, with evidence. Do not pad: if nothing needs a decision, say so in one item.
+- attention: what needs the human, most important first. Each item says the input and the decision the human has to make, with refs to the hand-offs that show it. End with one TIP listing what the human can stop worrying about, with refs. Do not pad: if nothing needs a decision, say so in one item. The script already adds items for new tests that pass on the old code and for changed lines nothing reached (see <script_findings>); do not repeat those.
 - traces: one entry per scenario worth showing, most important first, using the scenario ids. story: one to three sentences of cause and effect, naming the hand-off numbers. where: for the hand-off where the cause lies, point to the code (a Markdown link like [TypeCollector.cs line 239](${blob}/src/...#L239)); use handoff ids from <pipeline>.
-- units: the functions or stages that changed and the ones whose behaviour changed, each with what it receives and emits, what changed, and examples (input, before, after). Evidence: "observed" only when the example appears in the probe or test results, and then ref must name the scenario id or the test; "static" when you read it in the code; "stated" when only the author says so; "none" when nothing supports it.
-- claims: statements the author made (PR text, commit message, docs, code comments, test names and test comments), each with a verdict and the evidence for it. Include claims that hold.
+- units: the functions or stages that changed and the ones whose behaviour changed, each with what it receives and emits, what changed, and examples. An example is a note (one sentence on what the evidence shows) and refs; the script quotes the before and after values.
+- claims: statements the author made (PR text, commit message, docs, code comments, test names and test comments), each with a verdict, a one-sentence reason, and refs. Include claims that hold. A claim you could not check: verdict "not-verified" and no refs.
 - limits: what this review did not check.
 
-Write for a busy engineer: short sentences, concrete values, no jargon without a gloss, no praise. Code links go to ${blob}. Never link to issues in ${adapter.issueRepo}; write them as \`${adapter.issueRepo.split('/')[0]}#123\`.`;
+Write for a busy engineer: short sentences, no jargon without a gloss, no praise. Code links go to ${blob}. Never link to issues in ${adapter.issueRepo}; write them as \`${adapter.issueRepo.split('/')[0]}#123\`.`;
 
   const user = `${contextBlock(ctx, diff)}
 
@@ -162,63 +181,103 @@ ${JSON.stringify(probeDigest, null, 1)}
 </probe_results>
 
 <test_results>
-${JSON.stringify(tests, null, 1)}
+${JSON.stringify({ project: testSummary.project, after: testSummary.after, before: testSummary.before, changes: testSummary.changes }, null, 1)}
 </test_results>
+
+<test_names>
+${testNames.join('\n')}
+</test_names>
+
+<script_findings note="Computed by a script from the runs and shown in the comment as they are.">
+${JSON.stringify({ newTests: testSummary.newTests, changedLineCoverage: testSummary.coverage }, null, 1)}
+</script_findings>
 
 Write the review map.`;
 
-  const { value: a, model, usage } = await ask({ system, user, schema: Analysis, label: 'analyze' });
+  let a, model, usage;
+  if (opt['agent-output']) {
+    // Testing aid: reuse a recorded agent response instead of calling the API.
+    ({ value: a, model = 'recorded', usage = null } = JSON.parse(readFileSync(resolve(opt['agent-output']), 'utf8')));
+    a = Analysis.parse(a);
+  } else {
+    ({ value: a, model, usage } = await ask({ system, user, schema: Analysis, label: 'analyze' }));
+  }
+  writeJson('agent-output.json', { value: a, model, usage });
 
-  // The script, not the agent, decides what counts as observed: an "observed" example must cite a
-  // scenario that ran or a test that ran. Anything else is downgraded and listed in the comment.
-  const scenarioIds = after.concat(before).filter((s) => !s.probeError).map((s) => s.id);
-  const testNames = Object.values(tests.changes ?? []).map((c) => c.name.split('(')[0].split('.').pop());
-  const downgraded = [];
-  for (const u of a.units) {
-    for (const x of u.examples) {
-      if (x.evidence !== 'observed') continue;
-      const ref = x.ref ?? '';
-      const cited = scenarioIds.some((id) => ref.includes(id)) || testNames.some((t) => t && ref.includes(t)) || /\b\d+ (tests|passed)\b/.test(ref);
-      if (!cited) {
-        x.evidence = 'static';
-        downgraded.push(`"${x.input}" on ${u.name}: marked observed, but cites no scenario or test that ran`);
-      }
-    }
+  // The gate: every pointer the agent gave is resolved against the recordings and quoted by the script.
+  const readCode = (p) => {
+    const r = spawnSync('git', ['show', `${ctx.head}:${p}`], { cwd: repo, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+    return r.status === 0 ? r.stdout : null;
+  };
+  const verified = structuredClone(a);
+  const { unverified, downgraded } = verifyAnalysis(verified, { before, after, results, handoffs: HANDOFFS, readCode, blob });
+
+  // Every scenario a kept item cites gets a trace, so each quote can link to its full table.
+  const cited = new Set(
+    [...verified.summary, ...verified.attention, ...verified.claims, ...verified.units.flatMap((u) => u.examples)]
+      .flatMap((x) => x.refs)
+      .filter((r) => r.kind === 'run' && r.resolved?.ok)
+      .map((r) => r.scenario),
+  );
+  const traceCases = verified.traces.filter((t) => plan.scenarios.some((s) => s.id === t.id));
+  for (const id of cited) {
+    if (traceCases.some((t) => t.id === id)) continue;
+    const s = plan.scenarios.find((x) => x.id === id);
+    if (s) traceCases.push({ id, title: s.title, story: s.why, where: [] });
   }
 
   const ran = after.filter((s) => !s.probeError).map((s) => s.id);
   const failed = plan.scenarios.filter((s) => !ran.includes(s.id)).map((s) => s.id);
+  const sens = sensitivity({ tests, after, mutant, handoffs: HANDOFFS });
   const side = (t) => (t.built ? `${t.passed} passed, ${t.failed} failed` : `did not build (${t.reason})`);
+  const runId = process.env.GITHUB_RUN_ID;
+  let artifact = null;
+  if (runId) {
+    const r = spawnSync('gh', ['api', `repos/${ctx.slug}/actions/runs/${runId}/artifacts`, '--jq', '.artifacts[] | select(.name == "evidence") | .id'], { encoding: 'utf8' });
+    const id = r.stdout.trim().split('\n')[0];
+    if (id) artifact = `${process.env.GITHUB_SERVER_URL ?? 'https://github.com'}/${ctx.slug}/actions/runs/${runId}/artifacts/${id}`;
+  }
+  const ev = (f) => resolve(out, 'evidence', f);
   const analysis = {
     pr: {
       branch: ctx.pr.headRef,
       head: ctx.head.slice(0, 8),
       base: ctx.mergeBase.slice(0, 8),
+      blob,
       noLinkRepos: [adapter.issueRepo],
-      generatedBy: `Generated automatically by review-map with \`${model}\`, which did not write this change${process.env.GITHUB_RUN_ID ? ` · [workflow run](${process.env.GITHUB_SERVER_URL}/${ctx.slug}/actions/runs/${process.env.GITHUB_RUN_ID})` : ''}.`,
+      generatedBy: `Generated automatically by review-map with \`${model}\`, which did not write this change${runId ? ` · [workflow run](${process.env.GITHUB_SERVER_URL}/${ctx.slug}/actions/runs/${runId})` : ''}.`,
     },
-    summary: a.summary,
-    nodes: a.nodes,
-    edges: a.edges,
-    attention: a.attention,
+    confidence: confidence({ tests, failedScenarios: failed, sensitivity: sens }),
+    computed: computedAttention({ tests, blob }),
+    summary: verified.summary,
+    nodes: verified.nodes,
+    edges: verified.edges,
+    attention: verified.attention,
     traces: {
       evidence: 'evidence',
       adapter: adapter.name,
-      cases: a.traces
-        .filter((t) => plan.scenarios.some((s) => s.id === t.id))
-        .map((t) => ({ id: t.id, title: t.title, story: t.story, where: Object.fromEntries(t.where.map((w) => [w.handoff, w.text])) })),
+      cases: traceCases.map((t) => ({ id: t.id, title: t.title, story: t.story, where: Object.fromEntries(t.where.map((w) => [w.handoff, w.text])) })),
     },
-    tests,
-    units: a.units,
-    claims: a.claims,
+    tests: testSummary,
+    units: verified.units,
+    claims: verified.claims,
+    unverified,
+    sensitivity: sens,
+    integrity: {
+      files: fingerprints([resolve(out, 'scenarios.json'), ev('probe-before.json'), ev('probe-after.json'), ev('probe-mutant.json'), ev('tests.json')]),
+      artifact,
+      replay: runId
+        ? `node .review-map/review.mjs replay --run ${runId} --scenario {id} --repo <checkout of ${ctx.head.slice(0, 8)}>`
+        : `node review.mjs replay --from ${opt.out} --scenario {id} --repo <checkout of ${ctx.head.slice(0, 8)}>`,
+    },
     method: {
       observed: [
         `${plan.scenarios.length} scenarios chosen by the reviewing agent from the diff and the issue, each run through the real generator, analyzer and run-time serializer on both sides${failed.length ? `; ${failed.length} could not run: ${failed.map((f) => `\`${f}\``).join(', ')}` : ''}.`,
         `\`${tests.project}\` on both sides. After: ${side(tests.after)}. Before (${tests.before.mode}): ${side(tests.before)}. ${tests.changes.length} tests changed outcome.`,
-        `Built with .NET SDK ${tests.sdk} on ${tests.runner}.`,
-        `Reviewing agent: \`${model}\`, two calls (choose inputs, explain evidence). The trace tables and their cause and effect tags are computed by a script from the recorded runs.`,
+        `Built with .NET SDK ${tests.sdk} on ${tests.runner}${tests.pinnedSdk?.version ? ` (the repo pins ${tests.pinnedSdk.version})` : ''}.`,
+        `Reviewing agent: \`${model}\`, two calls (choose inputs, explain evidence). It cites evidence as pointers; every value quoted next to its words, the trace tables, the cause and effect tags, the test verdicts and the coverage are computed by a script from the recorded runs.`,
       ],
-      limits: [...a.limits, `Only \`${tests.project}\` was run; other test projects in the solution were not.`],
+      limits: [...verified.limits, `Only \`${tests.project}\` was run; other test projects in the solution were not.`],
       downgraded,
     },
     usage,
@@ -226,9 +285,62 @@ Write the review map.`;
   writeJson('analysis.json', analysis);
   const md = await render(analysis, { analysisDir: out });
   writeFileSync(resolve(out, 'comment.md'), md);
-  log(`analyze: comment.md written (${md.length} chars), ${downgraded.length} statements downgraded`);
+  log(`analyze: comment.md written (${md.length} chars), ${unverified.length} items unverified, ${downgraded.length} verdicts downgraded, ${analysis.confidence.length} confidence notes`);
 }
 
+// ---- replay ---------------------------------------------------------------------------------
+// Re-runs one input on the code before and after the change and compares it with the recording,
+// so anyone can re-check a finding without trusting the comment.
+function replay() {
+  if (!opt.scenario) throw new Error('replay needs --scenario <id>, and --run <workflow run id> or --from <local output dir>');
+  const work = resolve(out, `replay-${opt.scenario}`);
+  mkdirSync(work, { recursive: true });
+  let src = opt.from ? resolve(opt.from) : null;
+  if (!src) {
+    if (!opt.run) throw new Error('replay needs --run <workflow run id> or --from <dir>');
+    src = resolve(work, 'recorded');
+    const slug = opt.slug ? ['-R', opt.slug] : [];
+    for (const [name, dir] of [['plan', src], ['evidence', resolve(src, 'evidence')]]) {
+      const r = spawnSync('gh', ['run', 'download', opt.run, ...slug, '-n', name, '-D', dir], { encoding: 'utf8' });
+      if (r.status !== 0) throw new Error(`downloading the ${name} artifact failed: ${r.stderr}`);
+    }
+  }
+  // A workflow run's artifacts keep the probe files under evidence/; a hand-written review keeps them beside context.json.
+  const recDir = existsSync(resolve(src, 'evidence', 'probe-after.json')) ? resolve(src, 'evidence') : src;
+  const ctx = JSON.parse(readFileSync(resolve(src, 'context.json'), 'utf8'));
+  const scenarios = JSON.parse(readFileSync(resolve(src, 'scenarios.json'), 'utf8')).filter((s) => s.id === opt.scenario);
+  if (!scenarios.length) throw new Error(`no scenario ${opt.scenario} in ${src}`);
+  const actualHead = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).stdout.trim();
+  if (actualHead !== ctx.head) throw new Error(`--repo is at ${actualHead.slice(0, 8)}; check out the reviewed commit ${ctx.head.slice(0, 8)} first`);
+  const one = resolve(work, 'scenarios.json');
+  writeFileSync(one, JSON.stringify(scenarios));
+
+  console.log('Recorded evidence files (compare with the fingerprints in the comment footer):');
+  for (const f of fingerprints([resolve(src, 'scenarios.json'), resolve(recDir, 'probe-before.json'), resolve(recDir, 'probe-after.json')])) console.log(`  ${f.sha256}  ${f.name}`);
+  log(`replaying ${opt.scenario} on ${ctx.head.slice(0, 8)} and on its source reverted to ${ctx.mergeBase.slice(0, 8)} ...`);
+  collectEvidence({ repo, adapter, mergeBase: ctx.mergeBase, head: ctx.head, scenariosFile: one, outDir: work, rollForwardSdk: opt['rollforward-sdk'], probeOnly: true });
+
+  return import(new URL(`./adapters/${adapter.name}/handoffs.mjs`, import.meta.url)).then(({ handoffs }) => {
+    const H = handoffs({ code: (s) => s });
+    const get = (dir, side) => {
+      try {
+        return JSON.parse(readFileSync(resolve(dir, `probe-${side}.json`), 'utf8')).find((s) => s.id === opt.scenario);
+      } catch {
+        return undefined;
+      }
+    };
+    let mismatches = 0;
+    console.log(`\n${opt.scenario}`);
+    for (const h of H) {
+      const now = { before: get(work, 'before'), after: get(work, 'after') };
+      const rec = { before: get(recDir, 'before'), after: get(recDir, 'after') };
+      const same = ['before', 'after'].every((sd) => h.cell(now[sd]).key === h.cell(rec[sd]).key);
+      if (!same) mismatches++;
+      console.log(`  ${h.node.padEnd(28)} before: ${h.brief(now.before)}\n  ${''.padEnd(28)} after:  ${h.brief(now.after)}   ${same ? 'matches the recording' : 'DIFFERS FROM THE RECORDING'}`);
+    }
+    console.log(mismatches ? `\n${mismatches} hand-off(s) differ from the recording.` : '\nEvery hand-off matches the recording.');
+  });
+}
 // ---- post -----------------------------------------------------------------------------------
 function post() {
   const ctx = readJson('context.json');
@@ -244,7 +356,7 @@ function post() {
   log(`${existing ? 'updated' : 'posted'}: ${r.stdout.trim()}`);
 }
 
-const steps = { plan, evidence, analyze, post };
+const steps = { plan, evidence, analyze, post, replay };
 if (step === 'all') {
   await plan();
   evidence();
