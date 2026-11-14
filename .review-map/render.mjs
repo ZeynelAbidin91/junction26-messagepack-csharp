@@ -83,7 +83,9 @@ function evidence(refs, { traces = true } = {}) {
       continue;
     }
     if (d.kind === 'run') {
-      diff.push(`@@ ${d.scenario} · ${d.node} @@`);
+      // Circled digits are too small to read in a monospace block, so the step number is spelled out.
+      const node = String(d.node).replace(/^([①②③④⑤⑥])\s*/, (_, c) => `step ${'①②③④⑤⑥'.indexOf(c) + 1} · `);
+      diff.push(`@@ ${d.scenario} · ${node} @@`);
       if (d.side === 'both' && d.differs) diff.push(`- before: ${safe(d.before)}`, `+ after:  ${safe(d.after)}`);
       else if (d.side === 'both') diff.push(`  same before and after: ${safe(d.after)}`);
       else if (d.side === 'before') diff.push(`- before: ${safe(d.value)}`);
