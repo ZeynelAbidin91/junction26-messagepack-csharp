@@ -24,10 +24,27 @@ export function handoffs({ code }) {
     };
   };
 
+  const runtimeBrief = (s, name) => {
+    if (!s.runtime || s.runtime.error || !s.runtime.built) return 'did not run';
+    const cfg = s.runtime.configs?.find((c) => c.name === name);
+    if (!cfg) return 'no generated resolver';
+    if (cfg.error) return `throws ${cfg.error.split(':')[0]}`;
+    return cfg.valuesOut === s.runtime.valuesIn ? `out ${cfg.valuesOut} (intact)` : `out ${cfg.valuesOut} ⚠️ value changed`;
+  };
+
   const list = [
     {
       id: 'model',
       label: '① Model out of TypeCollector',
+      node: '① Model',
+      parents: ['input'],
+      brief: (s) => {
+        const ex = s.model.find((m) => m.exception);
+        if (ex) return `throws ${ex.exception}`;
+        const types = new Map();
+        for (const m of s.model) for (const o of m.objects ?? []) types.set(o.type.split('.').pop(), o.members.map((x) => x.split(' ')[0]));
+        return [...types].map(([t, ms]) => `${t}: ${ms.join(', ') || '-'}`).join('; ') || 'no types';
+      },
       cell: (s) => {
         const ex = s.model.find((m) => m.exception);
         if (ex) return { key: 'ex:' + ex.exception, show: `throws ${code(ex.exception)}` };
@@ -40,6 +57,22 @@ export function handoffs({ code }) {
     {
       id: 'diagnostics',
       label: '② Diagnostics out',
+      node: '② Diagnostics',
+      parents: ['input'],
+      brief: (s) => {
+        const ids = new Map();
+        for (const d of [...s.generatorDiagnostics, ...s.analyzerDiagnostics]) ids.set(d.id, (ids.get(d.id) ?? 0) + 1);
+        const runtimeBrief = (s, name) => {
+    if (!s.runtime || s.runtime.error || !s.runtime.built) return 'did not run';
+    const cfg = s.runtime.configs?.find((c) => c.name === name);
+    if (!cfg) return 'no generated resolver';
+    if (cfg.error) return `throws ${cfg.error.split(':')[0]}`;
+    return cfg.valuesOut === s.runtime.valuesIn ? `out ${cfg.valuesOut} (intact)` : `out ${cfg.valuesOut} ⚠️ value changed`;
+  };
+
+  const list = [...ids].map(([id, n]) => (n > 1 ? `${id} ×${n}` : id)).join(', ');
+        return `${list || 'none'}, ${buildFails(s) ? 'build fails' : 'build passes'}`;
+      },
       cell: (s) => {
         const groups = new Map();
         for (const d of [...s.generatorDiagnostics, ...s.analyzerDiagnostics]) {
@@ -54,6 +87,9 @@ export function handoffs({ code }) {
     {
       id: 'generated',
       label: '③ C# files out of the templates',
+      node: '③ C# files',
+      parents: ['model'],
+      brief: (s) => `${s.generated.length} files`,
       cell: (s) => {
         const names = s.generated.map((g) => g.hintName.replace(/^Formatters\./, '').replace(/\.g\.cs$/, '').replace(/`\d+/, '').split('.').pop());
         return {
@@ -62,13 +98,19 @@ export function handoffs({ code }) {
         };
       },
     },
-    { id: 'rtDefault', label: '④ Run time, default options', cell: (s) => runtimeCell(s, 'default options') },
-    { id: 'rtGenerated', label: '④ Run time, generated resolver first', cell: (s) => runtimeCell(s, 'generated resolver first') },
+    { id: 'rtDefault', label: '④ Run time, default options', node: '④ Run time, default', parents: ['input'], brief: (s) => runtimeBrief(s, 'default options'), cell: (s) => runtimeCell(s, 'default options') },
+    { id: 'rtGenerated', label: '④ Run time, generated resolver first', node: '④ Run time, generated code', parents: ['generated'], brief: (s) => runtimeBrief(s, 'generated resolver first'), cell: (s) => runtimeCell(s, 'generated resolver first') },
   ];
 
   // A scenario the probe could not run shows the reason in every row instead of crashing the table.
   return list.map((h) => ({
     ...h,
+    brief: (s) => {
+      if (!s) return 'not run';
+      if (s.probeError) return 'probe could not run';
+      if (s.sourceErrors?.length && h.id !== 'diagnostics') return 'scenario does not compile';
+      return h.brief(s);
+    },
     cell: (s) => {
       if (!s) return { key: 'missing', show: 'not run on this side' };
       if (s.probeError) return { key: 'probe:' + s.probeError, show: `probe could not run this case: ${esc(s.probeError)}` };
@@ -78,6 +120,11 @@ export function handoffs({ code }) {
       return h.cell(s);
     },
   }));
+}
+
+// What went into the pipeline, for the first node of a trace diagram.
+export function inputBrief(s) {
+  return s?.runtime?.valuesIn ?? null;
 }
 
 // Compact, model-readable digest of one probe side, for the reviewing agent.

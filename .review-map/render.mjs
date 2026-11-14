@@ -104,7 +104,7 @@ export async function render(a, { analysisDir = '.' } = {}) {
 
     p('### Follow one real input through the pipeline');
     p('');
-    p('Each case below is a real input, run on the code before and after this PR. The numbers match the arrows on the map. The values are copied from the runs by a script, and the script decides which rows differ. 🟧 marks the first hand-off where before and after differ, 🟦 marks what follows from it.');
+    p('Each case below is a real input, run on the code before and after this PR. Its diagram follows the input through the pipeline: every box shows what crossed that hand-off before and after the change. 🟧 marks where a difference starts (nothing upstream of it differs), 🟦 marks what follows from it, dashed arrows lead into boxes that differ. The values are copied from the runs and the tags are computed by a script; the full values are in the table under each diagram.');
     p('');
     a.traces.cases.forEach((c, i) => {
       const b = before.find((s) => s.id === c.id);
@@ -114,24 +114,62 @@ export async function render(a, { analysisDir = '.' } = {}) {
       p(`<details${i === 0 ? ' open' : ''}>`);
       p(`<summary><b>${c.title}</b></summary>`);
       p('');
+      // Cause and effect follow the pipeline graph: a hand-off that differs is a cause when nothing
+      // upstream of it differs, and an effect when something upstream does. Parallel branches can
+      // therefore each have their own cause.
+      const rows = HANDOFFS.map((h) => ({ h, x: h.cell(b), y: h.cell(f) }));
+      const differs = Object.fromEntries(rows.map((r) => [r.h.id, r.x.key !== r.y.key]));
+      const parentsOf = Object.fromEntries(HANDOFFS.map((h) => [h.id, h.parents ?? []]));
+      const upstreamDiffers = (id) => (parentsOf[id] ?? []).some((pid) => differs[pid] || upstreamDiffers(pid));
+      const tagOf = (r) => c.tags?.[r.h.id] ?? (!differs[r.h.id] ? 'same' : upstreamDiffers(r.h.id) ? 'effect' : 'cause');
+
+      // The trace as a diagram: the real input enters on the left, each node shows what crossed that
+      // hand-off before and after the change.
+      const mt = (s) => {
+        const t = String(s ?? '');
+        return (t.length > 70 ? t.slice(0, 68) + '…' : t).replace(/"/g, '#quot;').replace(/</g, '#lt;').replace(/>/g, '#gt;');
+      };
+      const NODE_TAG = { cause: '🟧 cause', effect: '🟦 effect', same: 'same' };
+      p('```mermaid');
+      p('flowchart LR');
+      const input = shown.runtime?.valuesIn;
+      p(`  n_input["<b>Input</b><br/>${mt(input ? `object: ${input}` : c.title)}"]:::input`);
+      for (const r of rows) {
+        const tag = tagOf(r);
+        const bx = r.h.brief(b);
+        const by = r.h.brief(f);
+        const body = differs[r.h.id] ? `before: ${mt(bx)}<br/>after: ${mt(by)}` : mt(by);
+        p(`  n_${r.h.id}["<b>${mt(r.h.node ?? r.h.label)}</b><br/>${NODE_TAG[tag]}<br/>${body}"]:::${tag}`);
+      }
+      for (const r of rows) for (const pid of r.h.parents ?? []) p(`  n_${pid} ${differs[r.h.id] ? '-.->' : '-->'} n_${r.h.id}`);
+      p('  classDef input fill:#EEEDFE,stroke:#534AB7,color:#26215C');
+      p('  classDef cause fill:#FAEEDA,stroke:#BA7517,stroke-width:2px,color:#412402');
+      p('  classDef effect fill:#E6F1FB,stroke:#185FA5,color:#0C447C');
+      p('  classDef same fill:#F1EFE8,stroke:#888780,color:#5F5E5A');
+      p('```');
+      p('');
+      p('<details>');
+      p('<summary>The input as C#</summary>');
+      p('');
       p('```csharp');
       const cut = (src) => src.split('\n[MessagePack.GeneratedMessagePackResolver]')[0].trim();
       if (shown.referencedSource) p('// ---- referenced assembly, compiled separately', cut(shown.referencedSource), '');
       p('// ---- your project', cut(shown.projectSource));
       p('```');
       p('');
+      p('</details>');
+      p('');
+      p('<details>');
+      p('<summary>Full values at each hand-off</summary>');
+      p('');
       p('| Hand-off | Before this PR | After this PR |');
       p('|---|---|---|');
-      let seenDifference = false;
-      for (const h of HANDOFFS) {
-        const x = h.cell(b);
-        const y = h.cell(f);
-        let tag = x.key === y.key ? 'same' : seenDifference ? 'effect' : 'cause';
-        if (x.key !== y.key) seenDifference = true;
-        tag = c.tags?.[h.id] ?? tag;
-        const where = c.where?.[h.id] ? `<br><sub>${c.where[h.id]}</sub>` : '';
-        p(`| ${h.label}<br>${TAG[tag]}${where} | ${cell(x.show)} | ${cell(y.show)} |`);
+      for (const r of rows) {
+        const where = c.where?.[r.h.id] ? `<br><sub>${c.where[r.h.id]}</sub>` : '';
+        p(`| ${r.h.label}<br>${TAG[tagOf(r)]}${where} | ${cell(r.x.show)} | ${cell(r.y.show)} |`);
       }
+      p('');
+      p('</details>');
       p('');
       p(c.story);
       p('');
